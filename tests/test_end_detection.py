@@ -70,6 +70,9 @@ class FakePage:
         return [FakeNode(text) for text in texts]
 
     async def evaluate(self, script):
+        # 提交验证的“消息是否出现在对话区”扫描不参与生成状态时序
+        if "style.display = 'none'" in script:
+            return ""
         index = self.eval_calls
         self.eval_calls += 1
         return self.generating[min(index, len(self.generating) - 1)]

@@ -18,8 +18,10 @@ class CompletionMixin:
     _GENERATING_JS = """
     () => {
       const words = ['\u505c\u6b62', 'stop', 'Stop', 'STOP'];
+      // 也要匹配 [aria-label]：很多网页版把「停止生成」做成只有 aria-label 的图标按钮
+      // （class 里不含 stop），不把 aria-label 纳入候选就会漏判「生成中」。
       const nodes = document.querySelectorAll(
-        'button, [role="button"], div[class*="stop"], span[class*="stop"], svg[class*="stop"]'
+        'button, [role="button"], [aria-label], div[class*="stop"], span[class*="stop"], svg[class*="stop"]'
       );
       for (const el of nodes) {
         const label = [

@@ -120,10 +120,34 @@ class ChatIOMixin:
     # 读取输入框当前文本：textarea 用 value，contenteditable 用 textContent
     # （不用 innerText：它遵循“渲染后可见性”，窗口不可见时会读到空串，
     # 会让「输入框已清空」的判定变成假阳性）。
+    # 节点已从页面断开（React 重挂载换了新节点）时返回 null 而不是旧值：
+    # 旧节点的残留文本不能被当成“提交后输入框还有字”。
     _COMPOSER_TEXT_JS = """
     (el) => {
+      if (!el.isConnected) return null;
       if (typeof el.value === 'string') return el.value;
       return el.textContent || el.innerText || '';
+    }
+    """
+
+    _COMPOSER_CONNECTED_JS = "(el) => !!el.isConnected"
+
+    # 判断“这条 prompt 是否已经出现在页面对话区”：textarea 的 value 不进
+    # innerText，但 contenteditable 的正文会。这里把输入框**临时隐藏**再读整页
+    # innerText（读完立即恢复）：既排除了草稿，也不受“对话里的消息文本与草稿
+    # 完全相同”影响（按字符串剔除会把对话里的那一份也误删）。
+    _PROMPT_IN_PAGE_JS = """
+    (el) => {
+      let hidden = null;
+      try {
+        if (el && el.isConnected && el.style) {
+          hidden = el.style.display;
+          el.style.display = 'none';
+        }
+        return document.body ? (document.body.innerText || '') : '';
+      } finally {
+        if (hidden !== null) { el.style.display = hidden; }
+      }
     }
     """
 
@@ -224,16 +248,17 @@ class ChatIOMixin:
     def _fill_timeout_s(self) -> float:
         return max(0.1, (config.FILL_TIMEOUT_MS or 10000) / 1000.0)
 
-    async def _locate_input(self, page):
-        """定位对话输入框：最多 3 轮 × 逐个候选选择器，只做 DOM 查询。
+    async def _locate_input(self, page, rounds: int = 3, timeout_ms: int = 2000):
+        """定位对话输入框：最多 ``rounds`` 轮 × 逐个候选选择器，只做 DOM 查询。
 
         绝不 bring_to_front / 抢 OS 焦点：提交走页面内事件（见 ``_submit_prompt``），
-        本就不依赖窗口是否在前台。
+        本就不依赖窗口是否在前台。验证提交时用更小的 ``rounds`` / ``timeout_ms``
+        （页面在那里必须立即答复，不能把轮询拖成长任务）。
         """
-        for _round in range(3):
+        for _round in range(max(1, rounds)):
             for selector in config.INPUT_SELECTORS:
                 try:
-                    node = await page.wait_for_selector(selector, timeout=2000)
+                    node = await page.wait_for_selector(selector, timeout=timeout_ms)
                     if node:
                         return node
                 except Exception:  # noqa: BLE001 选择器未命中 / 超时
@@ -241,7 +266,11 @@ class ChatIOMixin:
         return None
 
     async def _composer_text(self, handle) -> Optional[str]:
-        """读取输入框当前文本（best-effort；读不到返回 None，表示“无法判断”）。"""
+        """读取输入框当前文本（best-effort；读不到返回 None，表示“无法判断”）。
+
+        句柄已从页面断开（React 重挂载）时返回 None：旧节点上的文本是残留，
+        不能拿它当“还没提交”的判据（真机误报的根因）。
+        """
         if handle is None:
             return None
         try:
@@ -249,6 +278,15 @@ class ChatIOMixin:
         except Exception:  # noqa: BLE001
             return None
         return text if isinstance(text, str) else None
+
+    async def _handle_connected(self, handle) -> Optional[bool]:
+        """句柄是否仍挂在页面上（best-effort；提交误报时写进错误信息供排查）。"""
+        if handle is None:
+            return None
+        try:
+            return bool(await handle.evaluate(self._COMPOSER_CONNECTED_JS))
+        except Exception:  # noqa: BLE001
+            return None
 
     @staticmethod
     def _normalize_for_compare(text: str) -> str:
@@ -276,6 +314,43 @@ class ChatIOMixin:
             return False
         head = want[: min(120, len(want))]
         return have.startswith(head) and len(have) >= len(want)
+
+    # 「消息是否已经出现在对话区」判断用的归一化：网页把消息渲染成 markdown 后会
+    # 吞掉 `*` / 反引号 / `[]` 这类标记，双方都去掉这些字符再折叠空白才能可靠比对。
+    _PRESENCE_STRIP_RE = re.compile(r"[`*_#>~\[\]()|]+")
+
+    @classmethod
+    def _prompt_head_for_presence(cls, prompt: str) -> str:
+        """取 prompt 开头的可比较片段；太短（<12 字符）则放弃这条证据。"""
+        sample = cls._PRESENCE_STRIP_RE.sub(" ", prompt[:2000])
+        sample = re.sub(r"\s+", " ", sample).strip()
+        return sample[:120] if len(sample) >= 12 else ""
+
+    @classmethod
+    def _text_shows_prompt(cls, page_text: str, prompt: str) -> bool:
+        """页面对话区文本里是否已经出现这条 prompt 的开头。"""
+        head = cls._prompt_head_for_presence(prompt)
+        if not head or not page_text:
+            return False
+        normalized = re.sub(r"\s+", " ", cls._PRESENCE_STRIP_RE.sub(" ", page_text))
+        return head in normalized
+
+    async def _page_shows_prompt(self, page, prompt: str, handle=None) -> bool:
+        """这条 prompt 是否已经渲染进页面对话区（确认消息真的被网页收下）。
+
+        textarea 的 value 不进 innerText，但 contenteditable 的正文会；先把输入框
+        自身的文本从页面文本里剔除，避免把“还在框里的草稿”当成“已经发出的消息”。
+        失败一律返回 False（无法判断不作为证据）。
+        """
+        if page is None or not prompt:
+            return False
+        try:
+            page_text = await page.evaluate(self._PROMPT_IN_PAGE_JS, handle)
+        except Exception:  # noqa: BLE001
+            return False
+        if not isinstance(page_text, str):
+            return False
+        return self._text_shows_prompt(page_text, prompt)
 
     async def _composer_diag(self, handle) -> str:
         """收集输入框状态（best-effort：诊断本身绝不抛错）。"""
@@ -702,26 +777,38 @@ class ChatIOMixin:
         except Exception as exc:  # noqa: BLE001
             return f"（按钮状态不可读：{exc}）"
 
-    async def _prompt_submitted(self, page, chat_input, bucket: Optional[str] = None) -> Optional[bool]:
-        """刚才那次提交是否真的生效？None = 无法判断（不据此报错）。
+    async def _prompt_submitted(self, page, chat_input, bucket: Optional[str] = None):
+        """刚才那次提交是否真的生效？返回 ``(判定, 输入框句柄)``；None = 无法判断。
 
         判据（满足其一即为已提交）：
         * **输入框已清空**——网页接受了这条消息，最直接的证据；
         * 页面进入「生成中」（停止按钮出现）。
-        读不到输入框内容（页面差异 / 元素不可读）时返回 None，调用方按“无法验证”
-        处理，不把页面差异当成提交失败。
+        读不到输入框内容时**先重新定位一次输入框**再读：真机故障里 React 会在提交后
+        重挂载编辑器，旧节点已 disconnected 却仍保留着 fill 进去的文本；拿它当判据
+        就会把“已经发出去的消息”误判成没提交（用户侧看到的就是提交误报）。重新定位后
+        仍读不到才算无法判断，返回 None。
         """
         text = await self._composer_text(chat_input)
+        if text is not None and not text.strip():
+            return True, chat_input
         if text is None:
-            return None
-        if not text.strip():
-            return True
+            # 旧句柄已断连 / 不可读：换成当前页面上的输入框再读一次
+            fresh = await self._locate_input(page, rounds=1, timeout_ms=1000)
+            fresh_text = await self._composer_text(fresh) if fresh is not None else None
+            if fresh_text is not None:
+                chat_input, text = fresh, fresh_text
+                if not text.strip():
+                    return True, chat_input
+        # 读不到输入框内容时返回 None（无法判断）——此时**不**去探测「生成中」：
+        # 无法判断就不该继续做额外探测，也不该据此报错。
+        if text is None:
+            return None, chat_input
         if await self._page_is_generating(bucket or DEFAULT_SESSION_KEY):
-            return True
-        return False
+            return True, chat_input
+        return False, chat_input
 
-    async def _wait_submitted(self, page, chat_input, bucket: Optional[str] = None) -> Optional[bool]:
-        """等待「已提交」的迹象，最长 ``SUBMIT_VERIFY_MS``；None = 无法判断。
+    async def _wait_submitted(self, page, chat_input, bucket: Optional[str] = None):
+        """等待「已提交」的迹象，最长 ``SUBMIT_VERIFY_MS``；返回 ``(判定, 句柄)``。
 
         为什么不能只读一次：Enter 派发后，网页要先更新内部状态、清空输入框、
         再开始生成，都有延迟；立即读会看到「输入框里还有字」而误判成没提交。
@@ -729,29 +816,41 @@ class ChatIOMixin:
         """
         deadline = asyncio.get_event_loop().time() + max(0.0, config.SUBMIT_VERIFY_MS / 1000.0)
         while True:
-            submitted = await self._prompt_submitted(page, chat_input, bucket)
+            submitted, chat_input = await self._prompt_submitted(page, chat_input, bucket)
             if submitted is None:
-                return None
+                return None, chat_input
             if submitted or asyncio.get_event_loop().time() >= deadline:
-                return submitted
+                return submitted, chat_input
             await asyncio.sleep(0.1)
 
-    async def _submit_prompt(self, page, chat_input, bucket: Optional[str] = None) -> None:
+    async def _submit_prompt(self, page, chat_input, bucket: Optional[str] = None,
+                             prompt: Optional[str] = None) -> None:
         """提交 prompt，并**确认它真的发出去了**（全程无窗口焦点依赖）。
 
         为什么必须确认（真实故障）：旧实现把 ``keyboard.press("Enter")`` 当作一定成功，
         从来不验证、也没有兜底；当网页没接住按键时（长文本刚 fill 进去、编辑器还没
         接管，或发送按钮处于 disabled），输入框里就是“文字在、消息没发”，网页不产生
-        任何回复，客户端只能干等到超时（用户侧看到的就是「prompt 在输入框里但没发送」）。
+        任何回复，客户端只能干等到超时。
+
+        为什么还要看“消息出现在对话区”（第二个真实故障）：网页明明已经收下消息并开始
+        生成，但 React 会在提交后重挂载编辑器——旧句柄已断开却仍留着 fill 进去的文本，
+        只看旧句柄就会把“已发出”误判成“未提交”并直接抛错（客户端拿到 server_error）。
+        因此：① 读输入框前旧句柄不可读就重新定位；② 阶梯全部失败后，再看这条消息是否
+        **在提交之后新出现**在页面对话区里——出现即按已提交继续轮询。
 
         阶梯（每次尝试后都用 ``_wait_submitted`` 验证）：
         1. **真实键盘 Enter**（CDP，受控编辑器才认；合成事件常被忽略）；
         2. 点真正的发送按钮（先原生 click，再 DOM click）；
         3. 再派发一次合成 Enter（给编辑器消化大文本留出时间）。
-        三次都验证不到提交 -> 抛可行动错误（附按钮状态），不再静默等待。
+        以上都拿不到“已提交”证据才抛可行动错误（附发送按钮与输入框状态）。
         """
         plan = ("真实键盘 Enter", "发送按钮", "合成 Enter")
         last_detail = "（未知）"
+        # 提交前先记基线：任务重发同一段内容时，页面里可能**本来就有**这条消息，
+        # 只有“提交后才新出现”才能算本轮发出的证据。
+        prompt_was_visible: Optional[bool] = None
+        if prompt:
+            prompt_was_visible = await self._page_shows_prompt(page, prompt, chat_input)
         for index, action in enumerate(plan, start=1):
             try:
                 if action == "真实键盘 Enter":
@@ -762,7 +861,7 @@ class ChatIOMixin:
                     await self._click_send_button(page)
             except Exception as exc:  # noqa: BLE001 兜底本身出错不能中断阶梯
                 print(f"[提交] 第 {index}/{len(plan)} 次尝试（{action}）出错（已忽略）：{exc}")
-            submitted = await self._wait_submitted(page, chat_input, bucket)
+            submitted, chat_input = await self._wait_submitted(page, chat_input, bucket)
             if submitted is not False:
                 if index > 1:
                     print(f"[提交] 第 {index} 次尝试（{action}）成功。")
@@ -775,11 +874,22 @@ class ChatIOMixin:
                 f"[提交] 第 {index}/{len(plan)} 次尝试（{action}）无效：{last_detail}；"
                 f"发送按钮={await self._send_button_state(page)}"
             )
+        # 最终证据：消息在提交后新出现在对话区 -> 网页已经收下，输入框里的文本是
+        # 旧节点残留（或受控组件还没清空）。按已提交继续轮询，不要给客户端误报。
+        if prompt and prompt_was_visible is False:
+            if await self._page_shows_prompt(page, prompt, chat_input):
+                print("[提交] 页面对话区已出现本条消息：按已提交继续（输入框残留的是旧文本）。")
+                return
+            detail = "未在页面对话区检测到本条消息"
+        else:
+            detail = "页面侧无更多证据"
+        attached = await self._handle_connected(chat_input)
         raise RuntimeError(
             f"prompt 已写入输入框但未能提交（尝试 {len(plan)} 次：键盘 Enter -> 发送按钮 -> 合成 Enter）；"
-            f"{last_detail}。常见原因：发送按钮处于 disabled（编辑器还在消化长文本）、"
-            "页面停在非对话视图，或按键被网页忽略。可调大 SUBMIT_VERIFY_MS；"
-            "若与长 prompt 相关，可调小 PROMPT_MAX_CHARS / FILL_CHUNK_CHARS。"
+            f"{last_detail}；{detail}（输入框句柄仍挂载={attached}）。"
+            "常见原因：发送按钮处于 disabled（编辑器还在消化长文本）、页面停在非对话视图，"
+            "或按键被网页忽略。可调大 SUBMIT_VERIFY_MS；若与长 prompt 相关，"
+            "可调小 PROMPT_MAX_CHARS / FILL_CHUNK_CHARS。"
         )
 
     @staticmethod
@@ -880,7 +990,7 @@ class ChatIOMixin:
             #     不再假设「按了 Enter 就发出去了」：写不进去 / 发不出去会立刻抛
             #     可操作的错误，而不是让客户端干等到 RESPONSE_TIMEOUT_S。
             chat_input = await self._fill_prompt(page, prompt)
-            await self._submit_prompt(page, chat_input, bucket)
+            await self._submit_prompt(page, chat_input, bucket, prompt=prompt)
 
             # 2. 轮询等待回复完成
             await asyncio.sleep(config.POLL_INTERVAL_S)

@@ -79,7 +79,9 @@ class FakePage:
         return [FakeNode(t) for t in texts if t is not None]
 
     async def evaluate(self, script):
-        # 到顶检测与“生成中”检测共用 evaluate；用脚本内容区分
+        # 到顶检测 / 提交验证 / “生成中”检测共用 evaluate；用脚本内容区分
+        if "style.display = 'none'" in script:
+            return ""
         if "innerText" in script and "replace" in script:
             return self.page_text
         index = self.eval_calls

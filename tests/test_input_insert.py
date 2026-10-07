@@ -41,6 +41,7 @@ class FakeComposer:
         self.fill_ok = fill_ok          # False -> fill 抛超时
         self.fill_lands = fill_lands    # fill 抛超时时，文本是否其实已经落地
         self.exec_insert_ok = exec_insert_ok  # False -> execCommand 插入原语也失效
+        self.detached = False           # True -> 模拟 React 重挂载后的断连旧节点
         self.fill_calls = []
         self.click_calls = 0
 
@@ -56,7 +57,10 @@ class FakeComposer:
 
     async def evaluate(self, script, *args):
         if "typeof el.value === 'string'" in script:
-            return self.text
+            # 断连的旧节点读不到文本（返回 None 而不是旧值）
+            return None if self.detached else self.text
+        if "!!el.isConnected" in script:
+            return not self.detached
         if "execCommand('insertText'" in script:
             if not self.exec_insert_ok:
                 return False
@@ -104,8 +108,18 @@ class FakeKeyboard:
         self.insert_text_fails = False
 
     async def press(self, key):
-        if key == "Enter" and self.page.enter_submits:
-            self.page.composer.text = ""
+        if key != "Enter":
+            return
+        page = self.page
+        if page.enter_reveals_prompt:
+            # 网页接到消息后把它渲染进对话列表（输入框不一定同步清空）
+            page.page_text = page.enter_reveals_prompt
+        if page.remount_on_submit:
+            # 真机：提交后 React 重挂载编辑器，旧节点断连、新节点为空
+            page.composer.detached = True
+            page.composer = FakeComposer()
+        elif page.enter_submits:
+            page.composer.text = ""
 
     async def insert_text(self, text):
         if self.insert_text_fails:
@@ -135,7 +149,8 @@ class FakePage:
     """假页面：``query_selector_all`` 第一次是发送前的 baseline，之后按脚本返回回复。"""
 
     def __init__(self, composer=None, baseline=(), script=(), generating=(False,),
-                 enter_submits=True, button_submits=True, button_present=False):
+                 enter_submits=True, button_submits=True, button_present=False,
+                 page_text="", enter_reveals_prompt=None, remount_on_submit=False):
         self.composer = composer if composer is not None else FakeComposer()
         self.baseline = list(baseline)
         self.script = list(script) or [[None]]
@@ -147,6 +162,9 @@ class FakePage:
         self.button_dispatches = 0
         self.query_calls = 0
         self.eval_calls = 0
+        self.page_text = page_text          # 页面对话区文本（提交验证用）
+        self.enter_reveals_prompt = enter_reveals_prompt  # 按下 Enter 后页面出现的消息
+        self.remount_on_submit = remount_on_submit        # 提交后是否重挂载编辑器
         self.keyboard = FakeKeyboard(self)
         self.url = "https://chat.deepseek.com/"
 
@@ -165,7 +183,10 @@ class FakePage:
         return FakeButton(self) if self.button_present else None
 
     async def evaluate(self, script, *args):
-        # 页面级 evaluate：用脚本内容区分「继续按钮」「到顶检测」「生成中」
+        # 页面级 evaluate：用脚本内容区分「消息是否出现在对话区」「继续按钮」
+        # 「到顶检测」「生成中」
+        if "style.display = 'none'" in script:
+            return self.page_text
         if "clicked" in script:
             return {"clicked": False}
         if "innerText" in script and "replace" in script:
@@ -339,6 +360,29 @@ class SubmitTests(InputTestCase):
         self.assertGreaterEqual(page.button_clicks, 1)
         self.assertEqual(composer.text, "")
 
+    def test_remounted_composer_is_relocated_before_verdict(self):
+        # 真机故障：提交后 React 重挂载编辑器，旧句柄断连却仍保留 fill 的文本。
+        # 必须重新定位当前输入框再读，不能拿旧节点判“没提交”。
+        old = FakeComposer(text="prompt text")
+        page = FakePage(composer=old, remount_on_submit=True)
+        driver = self.driver_for(page)
+        asyncio.run(driver._submit_prompt(page, old))
+        self.assertTrue(old.detached)
+        self.assertEqual(page.composer.text, "")
+
+    def test_message_appearing_in_conversation_counts_as_submitted(self):
+        # 输入框文本还在、也没观测到生成中，但消息已经渲染进对话区：
+        # 说明网页收下了消息，不得误报失败（网页可能还没清空输入框）。
+        prompt = "hello world, please fix the login bug"
+        composer = FakeComposer(text=prompt)
+        page = FakePage(composer=composer, enter_submits=False, button_submits=False,
+                        button_present=False)
+        page.enter_reveals_prompt = f"**{prompt}**"  # 渲染成 markdown 后仍可匹配
+        driver = self.driver_for(page)
+        with unittest.mock.patch.object(config, "SUBMIT_VERIFY_MS", 50):
+            asyncio.run(driver._submit_prompt(page, composer, prompt=prompt))
+        self.assertEqual(composer.text, prompt)
+
     def test_raises_actionable_error_when_never_submitted(self):
         composer = FakeComposer(text="hi")
         page = FakePage(composer=composer, enter_submits=False, button_submits=False,
@@ -371,6 +415,15 @@ class PromptPresenceTests(InputTestCase):
         self.assertFalse(
             srv.DeepSeekWebDriver._prompt_present("hello world", "hello there")
         )
+
+    def test_presence_check_is_markdown_tolerant(self):
+        prompt = "修复登录 bug 的步骤"
+        self.assertTrue(
+            srv.DeepSeekWebDriver._text_shows_prompt("说明\n\n**修复登录 bug 的步骤**", prompt)
+        )
+
+    def test_presence_check_ignores_too_short_head(self):
+        self.assertFalse(srv.DeepSeekWebDriver._text_shows_prompt("短", "短"))
 
 
 class SendPathTests(InputTestCase):
