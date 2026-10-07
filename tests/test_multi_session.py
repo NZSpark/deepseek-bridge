@@ -25,7 +25,7 @@ URL_A2 = "https://chat.deepseek.com/a/chat/s/bbbbbbbb-5555-6666-7777-88888888888
 
 
 class FakeInput:
-    async def fill(self, text):
+    async def fill(self, text, **kwargs):
         self.text = text
 
 

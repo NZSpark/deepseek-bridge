@@ -125,6 +125,37 @@ MAX_UPSTREAM_RETRIES = env_int("DEEPSEEK_RETRIES", 2)
 RETRY_BACKOFF_S = env_float("RETRY_BACKOFF_S", 1.0)
 
 
+# ==================== 输入框写入 / 提交（长 prompt 防卡死）====================
+# 单条 prompt 的字符上限。这是**我们主动设的预算**，不是输入框的物理上限：
+# 超长 prompt 会在网页主线程上排成一个长任务（React 重渲染 + 富文本编辑器同步），
+# 表现为「输入框卡死」/ Playwright fill 超时。超过时保留头尾、截掉中间，
+# 并打印 [截断] 警告（工具结果可能被拦腰截断，不看日志无从察觉）。
+# 默认 48000（< 50K）；0 = 不限制（不建议）。可用 PROMPT_MAX_CHARS 覆盖。
+PROMPT_MAX_CHARS = env_int("PROMPT_MAX_CHARS", 48000)
+# 分块写入时每块的字符数：整段 fill 写不进去时按此大小分批插入，
+# 每块之间让出主线程，可断点续写（长 prompt 卡死的正解）。
+FILL_CHUNK_CHARS = env_int("FILL_CHUNK_CHARS", 4000)
+# 单次写入 / 点击 / JS 读取输入框的超时（毫秒）。
+FILL_TIMEOUT_MS = env_int("FILL_TIMEOUT_MS", 10000)
+# 写入输入框的最大尝试次数（每次尝试都会重新定位输入框）。
+FILL_RETRIES = env_int("FILL_RETRIES", 3)
+# 提交后等待「已提交」证据（输入框清空 / 页面进入生成中）的最长时间（毫秒）。
+# 超过仍验证不到就抛错，而不是让客户端干等到 RESPONSE_TIMEOUT_S。
+SUBMIT_VERIFY_MS = env_int("SUBMIT_VERIFY_MS", 3000)
+# 发送按钮候选选择器（"||" 分隔）：键盘 Enter 没被网页接住时的兜底。
+# 网页版改版时优先调整这里，无需改代码。
+SEND_BUTTON_SELECTORS = [
+    s.strip()
+    for s in env_str(
+        "SEND_BUTTON_SELECTORS",
+        'button[type="submit"]||button[aria-label*="发送"]||button[aria-label*="Send"]||'
+        'div[role="button"][aria-label*="发送"]||div[role="button"][aria-label*="Send"]||'
+        'button[class*="send"]',
+    ).split("||")
+    if s.strip()
+]
+
+
 # ==================== 会话生命周期 ====================
 # 启动时忽略已保存的会话，直接开一个新会话。搭配“播种”使用才安全（首轮会重放历史）。
 NEW_SESSION_ON_START = env_bool("DEEPSEEK_NEW_SESSION")

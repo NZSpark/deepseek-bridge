@@ -20,7 +20,7 @@ import deepseek_api_server as srv  # noqa: E402
 
 
 class FakeInput:
-    async def fill(self, text):
+    async def fill(self, text, **kwargs):
         return None
 
 

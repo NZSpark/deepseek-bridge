@@ -20,7 +20,7 @@ from deepseek_web.driver import DeepSeekContextLimitError, DeepSeekTimeoutError 
 
 
 class FakeInput:
-    async def fill(self, text):
+    async def fill(self, text, **kwargs):
         self.text = text
 
 
