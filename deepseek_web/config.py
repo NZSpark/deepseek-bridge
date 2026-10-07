@@ -181,6 +181,26 @@ SESSION_SCOPING = env_bool("SESSION_SCOPING", True)
 # 默认开：不同 AI 编程助手自动各用一条 DeepSeek 会话。关闭后退回旧的「默认桶，全局共用」行为。
 # 注意：自动分桶会使桶数随客户端数量增长，实际受 MAX_SESSION_BUCKETS 约束（超出按 LRU 回收页面，状态保留）。
 SESSION_SCOPING_BY_UA = env_bool("SESSION_SCOPING_BY_UA", True)
+# 当请求头与 user 字段都缺失时，是否允许**按工作目录自动分桶**。
+# 动机：同一个客户端在两个目录里各跑一个任务（例如两个 Pi）时 User-Agent 完全相同，
+# 只按 UA 分桶会把两个任务并进同一条网页会话，LLM 无法区分（任务互相污染）。
+# 工作目录从提示词里提取（Pi / Codex 的 `<cwd>…</cwd>` 段、
+# “Working directory: …”、Cline/Roo 的 “Current Workspace Directory (…)”。
+# 显式请求头 / user 字段仍然优先；关闭后退回 UA 分桶 / 默认桶。
+SESSION_SCOPING_BY_CWD = env_bool("SESSION_SCOPING_BY_CWD", True)
+# 工作目录的提取规则（"||" 分隔多条正则，大小写不敏感，取第 1 个捕获组）。
+# 只扫描 system / developer 消息与**首条** user 消息（Agent 的环境上下文都在这里），
+# 避免把用户后文里粘贴的路径误当成工作目录。
+SESSION_CWD_PATTERNS = [
+    p.strip()
+    for p in env_str(
+        "SESSION_CWD_PATTERNS",
+        r"<cwd>\s*([^<>]+?)\s*</cwd>||"
+        r"(?:working|project|workspace)\s+(?:directory|dir|folder)\s*[:=]\s*([^\s<>']+)||"
+        r"(?:working|project|workspace)\s+(?:directory|dir|folder)\s*\(([^)\r\n]+)\)",
+    ).split("||")
+    if p.strip()
+]
 # 单个 key 的长度上限（防止超长头部变成文件名/JSON 键）
 SESSION_KEY_MAX_LEN = env_int("SESSION_KEY_MAX_LEN", 64)
 # 同时在用的会话桶数量上限。超出时**回收最久未用**的页面（状态保留，下次按 URL 恢复）。

@@ -49,6 +49,8 @@ class EntryPointCompatTests(unittest.TestCase):
         "_session_key",
         "SESSION_KEY_HEADER",
         "SESSION_SCOPING",
+        "SESSION_SCOPING_BY_CWD",
+        "SESSION_CWD_PATTERNS",
         "SESSION_KEY_MAX_LEN",
         "MAX_SESSION_BUCKETS",
     ]
@@ -125,6 +127,33 @@ class AppTests(unittest.TestCase):
 
         for pattern in config.CAP_NOTICE_PATTERNS:
             re.compile(pattern)  # 不合法会直接抛错
+
+    def test_cwd_patterns_are_valid_regex_with_capture_group(self):
+        import re
+
+        self.assertGreaterEqual(len(config.SESSION_CWD_PATTERNS), 1)
+        for pattern in config.SESSION_CWD_PATTERNS:
+            compiled = re.compile(pattern, re.IGNORECASE)
+            self.assertGreaterEqual(compiled.groups, 1, pattern)
+
+    def test_cwd_patterns_match_pi_and_codex_style_prompts(self):
+        import re
+
+        pi_prompt = "<preamble>hi</preamble>\n\n<cwd>\n/Users/me/proj\n</cwd>"
+        codex_prompt = "<environment_context>\n<cwd>/srv/app</cwd>\n</environment_context>"
+        cline_prompt = "# Current Workspace Directory (/Users/me/ws) Files"
+        for text, expected in (
+            (pi_prompt, "/Users/me/proj"),
+            (codex_prompt, "/srv/app"),
+            (cline_prompt, "/Users/me/ws"),
+        ):
+            matched = None
+            for pattern in config.SESSION_CWD_PATTERNS:
+                m = re.search(pattern, text, re.IGNORECASE)
+                if m:
+                    matched = m.group(1).strip()
+                    break
+            self.assertEqual(matched, expected, text)
 
 
 if __name__ == "__main__":

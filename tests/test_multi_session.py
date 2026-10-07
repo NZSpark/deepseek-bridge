@@ -541,6 +541,138 @@ class SessionKeyResolutionTests(BucketTestCase):
             _session_key(self.request(user="pi-1"), None, "cline/3.2"), "pi-1"
         )
 
+    # ---- 按工作目录自动分桶（两个 Pi 在两个目录里跑）----
+
+    PI_UA = "pi/0.70.0"
+
+    @staticmethod
+    def pi_request(cwd_path, user=None):
+        """模拟 Pi 的真实 system prompt：工作目录写在 <cwd> 段里。"""
+        system = (
+            "<preamble>\nYou are an expert coding assistant operating inside pi…\n</preamble>\n\n"
+            "<tools>\n- read: Read a file\n- bash: Run a command\n</tools>\n\n"
+            f"<cwd>\n{cwd_path}\n</cwd>"
+        )
+        payload = {
+            "model": "deepseek-chat",
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": "继续修 bug"},
+            ],
+        }
+        if user:
+            payload["user"] = user
+        return srv.ChatCompletionRequest(**payload)
+
+    def test_two_pi_in_different_dirs_get_different_buckets(self):
+        from deepseek_web.server import _session_key
+
+        # 关键回归：两个 Pi 的 User-Agent 一样，只按 UA 会把两个任务并进同一条会话
+        first = _session_key(self.pi_request("/Users/me/Projects/alpha"), None, self.PI_UA)
+        second = _session_key(self.pi_request("/Users/me/Projects/beta"), None, self.PI_UA)
+        self.assertTrue(first.startswith("cwd:alpha-"), first)
+        self.assertTrue(second.startswith("cwd:beta-"), second)
+        self.assertNotEqual(first, second)
+
+    def test_cwd_bucket_is_stable_and_safe(self):
+        from deepseek_web.server import _session_key
+
+        request = self.pi_request("/Users/me/Projects/alpha")
+        key = _session_key(request, None, self.PI_UA)
+        # 同一目录永远得到同一个键（重启后仍然续用同一条网页会话）
+        self.assertEqual(
+            key,
+            _session_key(self.pi_request("/Users/me/Projects/alpha"), None, self.PI_UA),
+        )
+        self.assertRegex(key, r"^cwd:[\w.-]+-[0-9a-f]{8}$")
+        self.assertLessEqual(len(key), config.SESSION_KEY_MAX_LEN)
+
+    def test_same_basename_in_different_dirs_stays_isolated(self):
+        from deepseek_web.server import _session_key
+
+        first = _session_key(self.pi_request("/srv/one/app"), None, self.PI_UA)
+        second = _session_key(self.pi_request("/srv/two/app"), None, self.PI_UA)
+        self.assertTrue(first.startswith("cwd:app-"))
+        self.assertTrue(second.startswith("cwd:app-"))
+        self.assertNotEqual(first, second)
+
+    def test_header_and_user_still_win_over_cwd(self):
+        from deepseek_web.server import _session_key
+
+        self.assertEqual(
+            _session_key(self.pi_request("/Users/me/Projects/alpha"), "my-task", self.PI_UA),
+            "my-task",
+        )
+        self.assertEqual(
+            _session_key(
+                self.pi_request("/Users/me/Projects/alpha", user="pi-task-1"), None, self.PI_UA
+            ),
+            "pi-task-1",
+        )
+
+    def test_cwd_scoping_can_be_disabled(self):
+        from deepseek_web.server import _session_key
+
+        with unittest.mock.patch.object(config, "SESSION_SCOPING_BY_CWD", False):
+            # 关闭后退回 UA 分桶：两个目录又会被并进同一个 ua:pi 桶（旧行为）
+            self.assertEqual(_session_key(self.pi_request("/a/alpha"), None, self.PI_UA), "ua:pi")
+            self.assertEqual(_session_key(self.pi_request("/b/beta"), None, self.PI_UA), "ua:pi")
+
+    def test_cline_style_workspace_dir_in_first_user_message(self):
+        from deepseek_web.server import _session_key
+
+        request = srv.ChatCompletionRequest(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": "You are Cline."},
+                {
+                    "role": "user",
+                    "content": (
+                        "<environment_details>\n"
+                        "# Current Workspace Directory (/Users/me/work/ws-one) Files\n"
+                        "</environment_details>\n修个 bug"
+                    ),
+                },
+            ],
+        )
+        key = _session_key(request, None, "cline/3.2.1")
+        self.assertTrue(key.startswith("cwd:ws-one-"), key)
+
+    def test_paths_in_later_messages_are_not_used(self):
+        from deepseek_web.server import _session_key
+
+        request = self.pi_request("/Users/me/Projects/alpha")
+        # 后续消息里粘贴的路径不是工作目录，不能拿去分桶
+        request.messages.append(
+            {"role": "user", "content": "顺便看看 working directory: /tmp/elsewhere"}
+        )
+        self.assertTrue(_session_key(request, None, self.PI_UA).startswith("cwd:alpha-"))
+
+    def test_responses_instructions_are_scanned(self):
+        from deepseek_web.responses import ResponsesRequest
+        from deepseek_web.server import _session_key
+
+        request = ResponsesRequest(
+            model="deepseek-chat",
+            instructions=(
+                "<environment_context>\n  <cwd>/Users/me/Projects/codex-one</cwd>\n"
+                "</environment_context>"
+            ),
+            input="hi",
+        )
+        key = _session_key(request, None, "codex-tui/0.1")
+        self.assertTrue(key.startswith("cwd:codex-one-"), key)
+
+    def test_prose_mentioning_working_directory_is_ignored(self):
+        from deepseek_web.server import _session_key
+
+        # Pi 的 docs 段里有 “not the current working directory”，不能当成目录
+        request = self.pi_request("")
+        request.messages[0].content += (
+            "\nWhen reading pi docs, resolve docs/... not the current working directory"
+        )
+        self.assertEqual(_session_key(request, None, self.PI_UA), "ua:pi")
+
     def test_ua_scoping_can_be_disabled(self):
         from deepseek_web.server import _session_key
 

@@ -232,6 +232,34 @@ class SessionKeyTests(RouteTestCase):
         self.call(self.request(user="pi-task-2"))
         self.assertEqual(self.fake.chats[-1]["key"], "pi-task-2")
 
+    @staticmethod
+    def pi_request(cwd):
+        """模拟 Pi：工作目录在 system prompt 的 <cwd> 段里。"""
+        return srv.ChatCompletionRequest(
+            model="deepseek-chat",
+            messages=[
+                {
+                    "role": "system",
+                    "content": f"<preamble>You are pi</preamble>\n\n<cwd>\n{cwd}\n</cwd>",
+                },
+                {"role": "user", "content": "继续修 bug"},
+            ],
+        )
+
+    def test_two_pi_working_dirs_reach_the_driver_as_two_buckets(self):
+        # 端到端（路由 -> driver）：同一 UA 的两个 Pi 在两个目录里跑，
+        # 必须落到两个不同的会话桶，不能共用同一条网页会话。
+        self.call(self.pi_request("/Users/me/Projects/alpha"))
+        self.call(self.pi_request("/Users/me/Projects/beta"))
+        first, second = (chat["key"] for chat in self.fake.chats)
+        self.assertTrue(first.startswith("cwd:alpha-"), first)
+        self.assertTrue(second.startswith("cwd:beta-"), second)
+        self.assertNotEqual(first, second)
+
+    def test_explicit_header_still_wins_over_working_directory(self):
+        self.call(self.pi_request("/Users/me/Projects/alpha"), "my-task")
+        self.assertEqual(self.fake.chats[-1]["key"], "my-task")
+
     def test_absent_key_keeps_the_legacy_shared_session(self):
         self.call(self.request())
         self.assertIsNone(self.fake.chats[-1]["key"])
@@ -343,6 +371,8 @@ class HealthzTests(RouteTestCase):
         self.assertTrue(payload["browser_ready"])
         self.assertEqual(payload["session_keys"], ["default"])
         self.assertTrue(payload["session_scoping"])
+        self.assertTrue(payload["session_scoping_by_ua"])
+        self.assertTrue(payload["session_scoping_by_cwd"])
         # 多 Agent 观测：cluster 必须回报并发开关与桶上限
         self.assertTrue(payload["cluster"]["parallel"])
         self.assertEqual(payload["cluster"]["max_buckets"], 3)

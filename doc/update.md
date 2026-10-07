@@ -35,7 +35,7 @@
 | OpenAI 兼容 | `/v1/models`、`/v1/chat/completions`（SSE）、OpenAI 兼容错误体（400/502/503/504）|
 | Function Calling | 提示词注入 + 结构化解析模拟 |
 | **会话生命周期** | ✅ 体积预算自动轮转 + 轮转时**播种** + 到顶检测 + 重试阶梯 |
-| **按任务隔离会话** | ✅ `X-DeepSeek-Session` 分桶，每桶独立页面与状态；`POST /session/reset`；`SESSION_SCOPING=false` 可关闭 |
+| **按任务隔离会话** | ✅ `X-DeepSeek-Session` / `user` 分桶；缺失时按**工作目录**（`<cwd>` 段）再按 UA 自动分桶（两个 Pi 在不同目录 = 两条会话）；每桶独立页面与状态；`POST /session/reset`；`SESSION_SCOPING=false` 可关闭 |
 | 结束判定 | 文本变化判定回复出现 + 生成状态 / 内容稳定双重收尾 + 周期性到顶检测 |
 | 可运维 | `/healthz`（含 session 统计）、`/debug/dom`、`HEADLESS`、`DEEPSEEK_*` 系列环境变量 |
 | 测试 | **149 例全部通过**（stdlib unittest，`Ran 149 tests ... OK`）|
@@ -220,7 +220,7 @@
 1. **启动**：默认复用 `SESSION_FILE` 里的会话；仅当 `cap_hit` 或 `DEEPSEEK_NEW_SESSION=true` 时开新会话（首轮播种）。
 2. **运行**：超过 `SESSION_MAX_TURNS` / `SESSION_MAX_TOKENS` → 下一轮轮转 + 播种；页面出现「对话长度上限」提示 → `context_length_exceeded`（HTTP 400）+ 置 `pending_rotation`。
 3. **重试阶梯**：现有会话 → 恢复**同一个**会话（中间级） → **新会话 + 播种**（最后一级）。
-4. **按任务隔离**：`X-DeepSeek-Session`（可用 `SESSION_KEY_HEADER` 改名，`user` 字段兜底）→ 会话桶；每桶独立页面 + 独立状态；`SESSION_SCOPING=false` 关闭分桶。
+4. **按任务隔离**：`X-DeepSeek-Session`（可用 `SESSION_KEY_HEADER` 改名，`user` 字段兜底）→ 会话桶；两者都缺失时按**工作目录**（`SESSION_SCOPING_BY_CWD`，从提示词 `<cwd>` 段提取，解决“两个 Pi 在不同目录却共用一个 UA 桶”的串台）再按 **UA**（`SESSION_SCOPING_BY_UA`）自动分桶；每桶独立页面 + 独立状态；`SESSION_SCOPING=false` 关闭分桶。
 5. **手动逃生口**：`POST /session/reset[?session=<key>]`，只改状态（`pending_rotation`）→ 下一轮轮转，**仍会播种**。
 6. **桶页面回收**：`MAX_SESSION_BUCKETS`（默认 8）满时按 **LRU** 关掉最久未用的页面；空闲超过 `BUCKET_IDLE_TTL_S`（默认 900s）的页面也会被关掉。**只关页面、状态保留**，下次重开同一会话并按落点决定是否播种；正在生成回复的桶不会被回收。
 7. **并发（多 Agent）**：默认所有桶共用一把锁（**串行**，分桶只隔离上下文）；`PARALLEL_BUCKETS=true` 才按桶各持一把（同时驱动多个网页会话，有风控风险）。每个 Agent 一个会话标识即可并行；同一桶再入时受 `BUCKET_LOCK_TIMEOUT_S` 约束（超时返回 503 `upstream_busy`，不触发重试）。
@@ -236,7 +236,7 @@
 }
 ```
 
-旧格式（顶层单会话对象、乃至仅一行 URL 纯文本）仍然可读；默认桶永远在顶层，所以历史行为与旧测试无需改动。**相关配置项速查**：`SESSION_SCOPING` / `SESSION_KEY_HEADER` / `SESSION_KEY_MAX_LEN` / `MAX_SESSION_BUCKETS` / `BUCKET_IDLE_TTL_S` / `PARALLEL_BUCKETS` / `BUCKET_LOCK_TIMEOUT_S` / `READY_TIMEOUT_MS` / `SESSION_MAX_TURNS` / `SESSION_MAX_TOKENS` / `SEED_MAX_CHARS` / `CAP_CHECK_EVERY` / `CAP_NOTICE_PATTERNS` / `DEEPSEEK_NEW_SESSION` / `DEEPSEEK_TIMEOUT` / `DEEPSEEK_RETRIES`。
+旧格式（顶层单会话对象、乃至仅一行 URL 纯文本）仍然可读；默认桶永远在顶层，所以历史行为与旧测试无需改动。**相关配置项速查**：`SESSION_SCOPING` / `SESSION_SCOPING_BY_UA` / `SESSION_SCOPING_BY_CWD` / `SESSION_CWD_PATTERNS` / `SESSION_KEY_HEADER` / `SESSION_KEY_MAX_LEN` / `MAX_SESSION_BUCKETS` / `BUCKET_IDLE_TTL_S` / `PARALLEL_BUCKETS` / `BUCKET_LOCK_TIMEOUT_S` / `READY_TIMEOUT_MS` / `SESSION_MAX_TURNS` / `SESSION_MAX_TOKENS` / `SEED_MAX_CHARS` / `CAP_CHECK_EVERY` / `CAP_NOTICE_PATTERNS` / `DEEPSEEK_NEW_SESSION` / `DEEPSEEK_TIMEOUT` / `DEEPSEEK_RETRIES`。
 
 ---
 

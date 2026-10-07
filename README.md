@@ -11,6 +11,7 @@
 - **OpenAI 兼容接口**：完整实现 `/v1/models`、`/v1/chat/completions`，并额外提供 `/v1/responses`（OpenAI Responses API，供 **Codex CLI** 使用）；支持 `messages`、`tools`、`stream` 等标准字段；错误也以 OpenAI 兼容的 `error` 结构返回。
 - **可运维**：`GET /healthz` 健康检查、`HEADLESS` 无头模式、`/debug/dom` DOM 诊断端点（需 `DEEPSEEK_DEBUG=1`，且不回显正文）。
 - **会话生命周期**：自动识别网页版「对话长度上限」（不再伪装成超时），超预算时自动轮转到新会话，并**播种**已有上下文。
+- **按任务隔离会话**：显式 `X-DeepSeek-Session` / `user` 字段优先；缺失时按提示词里的**工作目录**自动分桶（两个 Pi 在两个目录里跑各自一条会话，无需配置），再按 `User-Agent` 隔离不同客户端；每个任务独立页面与状态。
 - **流式响应（SSE）**：以 `text/event-stream` 逐字吐出内容，兼容 OpenAI 流式解析器。
 - **模拟 Function Calling**：网页版本身不支持 function calling，本项目通过「提示词注入 + 结构化解析」模拟出 OpenAI 的 `tool_calls` 语义。
 - **代码块自动落盘**：直接从网页 DOM 的 `<pre><code>` 提取代码，自动按语言保存为 `.py` / `.js` / `.json` 等文件到 `output/`。
@@ -25,14 +26,14 @@
 
 | 指标 | 数值 |
 | --- | --- |
-| 生产代码行数（`deepseek_web/` 16 个模块） | **4,264** 行 |
-| 入口文件 `deepseek_api_server.py` | 120 行 |
-| **生产代码合计** | **约 4,384 行** |
-| 测试代码行数（`tests/`，10 个文件） | **2,976** 行 |
-| 测试用例数量 | **219** 个（stdlib `unittest`，全部通过） |
-| 测试 / 生产代码比 | 约 **0.68 : 1** |
-| 最大的单个模块 | `chat_io.py`（1,142 行，浏览器输入 / 提交 / 解析核心） |
-| 提交次数 | 18 次 |
+| 生产代码行数（`deepseek_web/` 15 个模块） | **4,526** 行 |
+| 入口文件 `deepseek_api_server.py` | 122 行 |
+| **生产代码合计** | **约 4,648 行** |
+| 测试代码行数（`tests/`，10 个文件） | **3,225** 行 |
+| 测试用例数量 | **236** 个（stdlib `unittest`，全部通过） |
+| 测试 / 生产代码比 | 约 **0.69 : 1** |
+| 最大的单个模块 | `chat_io.py`（1,252 行，浏览器输入 / 提交 / 解析核心） |
+| 提交次数 | 20 次 |
 | 开发周期 | 2026-10-02 ～ 2026-10-08（约 7 天） |
 
 > 统计口径：`wc -l` 行数、`git rev-list --count HEAD` 提交数；测试用例数为 `tests/*.py` 中 `def test_` 的数量。数字随代码演进会变化，更新 README 时请重新核对。
@@ -241,7 +242,7 @@ DeepSeek 网页版不支持原生 function calling，本项目采用三步模拟
 - **超时**：单轮生成总超时默认 180 秒，可用环境变量 `DEEPSEEK_TIMEOUT` 覆盖（必须小于 Pi 侧 HTTP 客户端的超时，否则客户端会先报错）。若超时前已读到回复内容，会直接返回该内容而**不重发**；只有页面上完全没有产生新回复时才视为发送失败，恢复会话后重试一次。客户端建议设置较长 timeout（`client_test.py` 中为 240s）。
 - **重试**：只有「等待超时」才会重试，最多 `DEEPSEEK_RETRIES` 次（默认 2），每次先尝试恢复会话再退避重试；找不到输入框、profile 被占用等属于不可重试，直接返回错误。
 - **无头运行**：已登录过之后可用 `HEADLESS=1` 启动（适合 CI / 无显示环境）；首次登录必须有头模式。
-- **健康检查**：`GET /healthz` 返回浏览器是否就绪、当前会话地址、会话状态（`session`）、在用会话桶（`session_keys`）与初始化错误，便于客户端探活。
+- **健康检查**：`GET /healthz` 返回浏览器是否就绪、当前会话地址、会话状态（`session`）、在用会话桶（`session_keys`）、分桶开关（`session_scoping` / `session_scoping_by_ua` / `session_scoping_by_cwd`）与初始化错误，便于客户端探活。
 - **诊断**：`DEEPSEEK_DEBUG=1` 启动后，每轮轮询都会打印节点数 / 文本长度 / 稳定计数 / 生成状态，可直接看出结束判定是否生效。`GET /debug/dom` 会返回回复节点的 class / 长度 / sha1 与疑似停止按钮控件结构 —— **不包含任何正文**，且只在 `DEEPSEEK_DEBUG=1` 时才注册（否则返回 404）。
 - **流式语义**：不带 `tools` 时边生成边吐字；带 `tools` 时必须先缓冲完整回复才能判断是不是 `tool_calls`，因此调用方在生成期间只会收到 `: keep-alive` 注释，随后一次性收到内容或 tool_calls。
 - **会话生命周期**（重要）：服务默认**复用同一个网页会话**，因此模型看到的是累积上下文，与客户端的 `contextWindow` 无关。为了不让它无限增长：
@@ -250,7 +251,12 @@ DeepSeek 网页版不支持原生 function calling，本项目采用三步模拟
   - 网页版到顶时会弹出提示并停止响应，服务会识别它并返回 `context_length_exceeded`，而不是死等到超时；重试阶梯的**最后一级**就是“换新会话 + 重放历史”；
   - 想手动换一个干净会话：`POST /session/reset`、设 `DEEPSEEK_NEW_SESSION=true` 后重启，或删除 `user_data/.deepseek_session`；
   - 想知道当前会话涨到哪了：看 `GET /healthz` 的 `session` 字段（`turns` / `est_tokens` / `cap_hit` / `pending_rotation`）。
-- **按任务隔离会话**：默认所有请求共用一条网页会话。若同时跑多个任务（例如多个 Pi 会话），给每个任务带一个 `X-DeepSeek-Session: <任务 id>` 请求头，服务会为每个 id 维护独立的网页会话与页面；状态存在 `user_data/.deepseek_session` 里，默认会话仍在文件顶层、其余在 `sessions` 下。
+- **按任务隔离会话**：服务为不同任务维护独立的网页会话与页面，上下文互不污染。任务标识按以下优先级确定：
+  1. `X-DeepSeek-Session: <任务 id>` 请求头（可用 `SESSION_KEY_HEADER` 改名）；2. 请求体的 `user` 字段；3. **提示词里的工作目录**（`SESSION_SCOPING_BY_CWD`，默认开）；4. `User-Agent`（`SESSION_SCOPING_BY_UA`，默认开）。
+  - **两个 Pi 在两个目录里跑**（User-Agent 完全相同，最典型的串台场景）：第 3 步从 Pi 的 system prompt（`<cwd>…</cwd>` 段）提取工作目录，生成 `cwd:<目录名>-<路径哈希>` 桶，两个任务自动各用一条会话，**Pi 侧无需任何配置**。Codex 的环境上下文、Cline/Roo 的 `Current Workspace Directory (…)` 同样会被识别（只扫 `system`/`developer` 消息与首条 `user` 消息，避免把正文里粘贴的路径误当目录）。
+  - 想固定 / 自定义任务标识（例如同一目录下的两个任务、或客户端不发送工作目录）：显式传请求头或 `user` 字段，它们永远优先于自动识别；`SESSION_CWD_PATTERNS` 自定义目录提取正则。
+  - 想确认真的分开了：`GET /healthz` 的 `session_keys` 列出在用会话桶（如 `cwd:proj-a-1a2b3c4d`），另有 `session_scoping_by_ua` / `session_scoping_by_cwd` 两个开关状态。
+  - 状态存在 `user_data/.deepseek_session` 里，默认会话仍在文件顶层、其余在 `sessions` 下。`SESSION_SCOPING=false` 整体关闭分桶（退回“全局共用一个会话”），`SESSION_SCOPING_BY_CWD=false` / `SESSION_SCOPING_BY_UA=false` 只关自动识别。
   - **桶页面上限**：`MAX_SESSION_BUCKETS`（默认 8）。超出时不会报错，而是关闭**最久未用**的那条页面（`BUCKET_IDLE_TTL_S` 秒内没有任何请求的页面也会被关掉）。被关掉不等于丢上下文：会话状态还在，下次用到时会重新打开同一个会话并按需播种。设 `0` 表示不允许额外桶（一律走默认会话）。
   - ⚠️ **分桶 ≠ 并发**：默认所有桶共用一把锁，请求仍然**串行**执行（分桶只提供上下文隔离）。确实需要并行时设 `PARALLEL_BUCKETS=true` 按桶加锁，但这会同时驱动多个网页会话，**可能触发风控**，请自行评估。
   - **多 Agent 同时访问**：给每个 Agent 一个独立的会话标识，并打开并发。推荐配置：
@@ -276,7 +282,7 @@ DeepSeek 网页版不支持原生 function calling，本项目采用三步模拟
 .venv/bin/python -m unittest discover -s tests -t . -v
 ```
 
-共 176 个用例，覆盖解析层、结束判定、会话生命周期（播种 / 到顶 / 轮转 / 重试阶梯 / 会话桶 / 页面回收 / 锁）、模块结构、路由层，以及 **Responses API 兼容层**（请求映射 / 响应结构 / 命名 SSE 事件 / 工具调用 / 错误映射）。全部用假 page / 假 driver 驱动，不需要启动浏览器，也不需要额外依赖（只用标准库 unittest）。
+共 236 个用例，覆盖解析层、结束判定、会话生命周期（播种 / 到顶 / 轮转 / 重试阶梯 / 会话桶 / 页面回收 / 锁）、模块结构、路由层，以及 **Responses API 兼容层**（请求映射 / 响应结构 / 命名 SSE 事件 / 工具调用 / 错误映射）。全部用假 page / 假 driver 驱动，不需要启动浏览器，也不需要额外依赖（只用标准库 unittest）。
 
 ---
 
@@ -354,7 +360,9 @@ network_access = true
 
 pi --provider deepseek-web --model deepseek-chat
 
-建议给每个 Agent 任务带一个固定的 `X-DeepSeek-Session` 请求头（或让客户端填 `user` 字段），这样多个任务各自持有独立会话，不会互相污染上下文。
+**多个 Pi 跑在不同目录时无需额外配置**：bridge 会从 Pi 的 system prompt（`<cwd>` 段）自动识别工作目录，给每个目录一条独立网页会话（桶名形如 `cwd:proj-a-1a2b3c4d`），不会把两个任务混进同一条对话。想看是否生效：`curl http://127.0.0.1:8000/healthz`，看 `session_keys`。
+
+如需固定 / 自定义任务标识（例如同一目录下跑多个任务），再给每个任务带一个固定的 `X-DeepSeek-Session` 请求头（或让客户端填 `user` 字段），它们永远优先于自动识别。
 
 ```json
 {

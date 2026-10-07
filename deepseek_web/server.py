@@ -1,10 +1,11 @@
 """FastAPI 应用与路由（OpenAI 兼容层）。"""
 
+import functools
 import hashlib
 import re
 import traceback
 from contextlib import asynccontextmanager
-from typing import List, Optional
+from typing import Any, List, Optional, Tuple
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -98,6 +99,127 @@ def _client_from_ua(ua: str) -> Optional[str]:
     return None
 
 
+def _content_to_prompt_text(content: Any) -> str:
+    """把消息 content（字符串 / 分片数组 / Responses 风格对象）抽成纯文本。"""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        pieces: List[str] = []
+        for part in content:
+            if isinstance(part, str):
+                pieces.append(part)
+            elif isinstance(part, dict):
+                text = part.get("text")
+                if isinstance(text, str):
+                    pieces.append(text)
+        return "\n".join(pieces)
+    if isinstance(content, dict):
+        text = content.get("text")
+        return text if isinstance(text, str) else ""
+    return ""
+
+
+def _cwd_candidate_texts(request: Any) -> List[str]:
+    """收集可能写着工作目录的提示词文本（全部 system/developer + 首条 user）。
+
+    Pi 的 system prompt 带 ``<cwd>…</cwd>`` 段；Codex 在 ``instructions`` 里带环境
+    上下文；Cline / Roo Code 把 “Current Workspace Directory (…)” 放在首条 user
+    消息的 ``<environment_details>`` 里。只取这些位置，避免把用户正文里的路径
+    误当成工作目录（那会让会话桶跟着正文内容漂移）。
+    """
+    texts: List[str] = []
+    instructions = getattr(request, "instructions", None)
+    if isinstance(instructions, str) and instructions.strip():
+        texts.append(instructions)
+
+    first_user = ""
+    messages = getattr(request, "messages", None)
+    if isinstance(messages, list):
+        for message in messages:
+            role = getattr(message, "role", None)
+            content = getattr(message, "content", None)
+            if role is None and isinstance(message, dict):
+                role, content = message.get("role"), message.get("content")
+            text = _content_to_prompt_text(content)
+            if not text.strip():
+                continue
+            if role in ("system", "developer"):
+                texts.append(text)
+            elif role == "user" and not first_user:
+                first_user = text
+
+    raw_input = getattr(request, "input", None)
+    if isinstance(raw_input, list):
+        for item in raw_input:
+            if not isinstance(item, dict):
+                continue
+            role = item.get("role")
+            if role in ("system", "developer"):
+                text = _content_to_prompt_text(item.get("content"))
+                if text.strip():
+                    texts.append(text)
+            elif role == "user" and not first_user:
+                first_user = _content_to_prompt_text(item.get("content"))
+
+    if first_user.strip():
+        texts.append(first_user)
+    return texts
+
+
+@functools.lru_cache(maxsize=16)
+def _compiled_cwd_patterns(patterns: Tuple[str, ...]) -> Tuple[re.Pattern, ...]:
+    """编译 SESSION_CWD_PATTERNS（按其取值缓存）。非法正则跳过，不拖垮请求。"""
+    compiled = []
+    for pattern in patterns:
+        try:
+            compiled.append(re.compile(pattern, re.IGNORECASE))
+        except re.error:
+            continue
+    return tuple(compiled)
+
+
+def _extract_cwd(text: str) -> Optional[str]:
+    """从提示词文本里提取工作目录（取第 1 条命中的捕获组）。"""
+    for pattern in _compiled_cwd_patterns(tuple(config.SESSION_CWD_PATTERNS)):
+        match = pattern.search(text)
+        if not match:
+            continue
+        candidate = (match.group(1) or "").strip().strip("`\"'")
+        candidate = candidate.rstrip("/\\.,;: ").strip()
+        if candidate:
+            return candidate
+    return None
+
+
+def _bucket_from_cwd(path: str) -> Optional[str]:
+    """工作目录 -> 稳定、短、可读的会话桶名：``cwd:<目录名>-<路径哈希8位>``。
+
+    带哈希是为了「不同路径、同名目录」也不会共用会话；同一目录永远得到同一个键，
+    因此重启后仍然续用同一条网页会话。
+    """
+    normalized = path.strip().strip("`\"'").replace("\\", "/").rstrip("/")
+    if not normalized:
+        return None
+    name = normalized.rsplit("/", 1)[-1].strip()
+    if not name or name in (".", ".."):
+        return None
+    safe_name = re.sub(r"[^\w.-]", "_", name)[:32] or "dir"
+    digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:8]
+    return f"cwd:{safe_name}-{digest}"
+
+
+def _session_key_from_cwd(request: Any) -> Optional[str]:
+    """按提示词里的工作目录派生会话桶（找不到返回 None）。"""
+    for text in _cwd_candidate_texts(request):
+        path = _extract_cwd(text)
+        if not path:
+            continue
+        bucket = _bucket_from_cwd(path)
+        if bucket:
+            return bucket
+    return None
+
+
 def _session_key(
     request: ChatCompletionRequest,
     header_value: Optional[str],
@@ -109,10 +231,13 @@ def _session_key(
 
     1. ``X-DeepSeek-Session`` 请求头（可用 ``SESSION_KEY_HEADER`` 改名）；
     2. OpenAI 的 ``user`` 字段；
-    3. **自动识别**：从 ``User-Agent`` 提取客户端名称，使不同客户端自动隔离。
+    3. **按工作目录自动分桶**：从提示词里提取 cwd（Pi / Codex 的 ``<cwd>`` 段等）。
+       两个 Pi 在两个不同目录里跑时 User-Agent 相同，只按 UA 会把两个任务并进
+       同一条网页会话；按 cwd 分桶后各用一条独立会话。
+    4. **按 User-Agent 自动分桶**：从 UA 提取客户端名称，使不同客户端自动隔离。
 
-    前两者都没有、且 User-Agent 也无法识别时返回 None（默认桶，全局共用）。
-    取值会被消毒（只保留 ``[\\w.\\-:]``）并限长，避免变成非法文件名 / 超长 JSON 键。
+    以上都没有时返回 None（默认桶，全局共用）。取值会被消毒（只保留
+    ``[\\w.\\-:]``）并限长，避免变成非法文件名 / 超长 JSON 键。
     """
     if not config.SESSION_SCOPING:
         return None
@@ -121,6 +246,9 @@ def _session_key(
         user = getattr(request, "user", None)
         raw = user if isinstance(user, str) else ""
     raw = raw.strip()
+    if not raw and config.SESSION_SCOPING_BY_CWD:
+        # 工作目录来自提示词（Pi 的 system prompt 里带 <cwd>…</cwd>）
+        raw = _session_key_from_cwd(request) or ""
     if not raw and config.SESSION_SCOPING_BY_UA:
         # 自动按 User-Agent 分桶：不同客户端自动隔离到不同会话（可由参数关闭）
         raw = _client_from_ua(user_agent or "") or ""
@@ -144,6 +272,8 @@ async def healthz():
             "session": driver.session_stats(),
             "session_keys": driver.session_keys(),
             "session_scoping": config.SESSION_SCOPING,
+            "session_scoping_by_ua": config.SESSION_SCOPING_BY_UA,
+            "session_scoping_by_cwd": config.SESSION_SCOPING_BY_CWD,
             "cluster": driver.cluster_stats(),
             "init_error": driver.init_error,
         },
