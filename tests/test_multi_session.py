@@ -480,6 +480,22 @@ class SaveFilesTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertTrue(first[0].endswith(".md"))
 
+    def test_server_style_call_through_the_instance(self):
+        """回归：server 是按 ``driver.save_extracted_files(raw, blocks, dir)`` 调的。
+
+        方法缺 ``self`` / 缺 ``@staticmethod`` 时，实例访问会把实例占掉一个位置参数，
+        于**每一次成功生成**都在这里抛
+        ``TypeError: takes 3 positional arguments but 4 were given``——
+        整轮回复白做，客户端只看到 500（且只在非流式分支触发，很容易漏测）。
+        """
+        driver = srv.DeepSeekWebDriver()
+        with tempfile.TemporaryDirectory() as out:
+            saved = driver.save_extracted_files(
+                "回复正文", [{"lang": "python", "code": "print(1)"}], out
+            )
+        self.assertEqual(len(saved), 1)
+        self.assertTrue(saved[0].endswith(".py"))
+
 
 class SessionKeyResolutionTests(BucketTestCase):
     """server._session_key：请求头 / user 字段 -> 会话桶。"""

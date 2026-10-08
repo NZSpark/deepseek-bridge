@@ -28,6 +28,7 @@ from .errors import (  # noqa: F401  (re-export)
     HOME_URL,
     DeepSeekBusyError,
     DeepSeekContextLimitError,
+    DeepSeekPageLostError,
     DeepSeekTimeoutError,
 )
 from .models import ChatMessage
@@ -67,6 +68,10 @@ class DeepSeekWebDriver(PagePoolMixin, SessionStoreMixin, CompletionMixin, ChatI
         # 正在处理请求（已拿到锁、正在生成）的会话桶，供 /healthz 观察多 Agent 占用。
         # 不能用“锁是否被持有”来推断：串行模式下所有桶共用一把锁，会把所有桶都算成忙。
         self._active_buckets: set = set()
+        # 同一批活跃桶的可重入计数：send_chat 与 _session_lock 都会标记活跃，
+        # 计数归零才算真正空闲（否则内层先退出就会把外层请求的保护提前撤掉）。
+        # 页面回收 / LRU 淘汰以它为准，保证不会关掉一条正在处理请求的页面。
+        self._active_counts: Dict[str, int] = {}
 
     async def init(self):
         """初始化浏览器实例"""

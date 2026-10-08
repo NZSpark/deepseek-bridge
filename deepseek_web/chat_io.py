@@ -4,10 +4,10 @@
 ``_insert_prompt_in_chunks``（整段 fill 优先，写不进去则分块插入、可断点续写）、
 ``_submit_prompt``（提交并验证真的发出去了），``_clamp_prompt`` 是最后一道字符预算护栏。
 
-依赖页面池（``_ensure_page`` / ``_page_for`` / ``_session_lock`` / ``_touch_page`` /
-``_remember_session`` / ``_start_new_session`` / ``_recover_session`` / ``_state`` /
-``_session_over_budget``）与生成检测（``_page_is_generating`` /
-``_click_continue_if_present`` / ``_page_shows_context_limit`` /
+依赖页面池（``_ensure_page`` / ``_rebuild_page`` / ``_page_is_alive`` / ``_page_for`` /
+``_session_lock`` / ``_touch_page`` / ``_remember_session`` / ``_start_new_session`` /
+``_recover_session`` / ``_state`` / ``_session_over_budget``）与生成检测
+（``_page_is_generating`` / ``_click_continue_if_present`` / ``_page_shows_context_limit`` /
 ``_mark_context_limit`` / ``_context_limit_error``）。
 """
 
@@ -19,7 +19,12 @@ from pathlib import Path
 from typing import List, Optional
 
 from . import config
-from .errors import DEFAULT_SESSION_KEY, DeepSeekContextLimitError, DeepSeekTimeoutError
+from .errors import (
+    DEFAULT_SESSION_KEY,
+    DeepSeekContextLimitError,
+    DeepSeekPageLostError,
+    DeepSeekTimeoutError,
+)
 from .prompting import _delta_piece, estimate_tokens
 
 
@@ -63,46 +68,71 @@ class ChatIOMixin:
         seeded = seeded_prompt or prompt
         max_attempts = max(1, config.MAX_UPSTREAM_RETRIES)
         last_error: Optional[RuntimeError] = None
+        page_rebuilt = False   # 上一轮是否刚因为“页面失效”重建过（避免再走恢复阶梯）
 
-        # 额外的会话桶需要自己的页面（默认桶就是 self.page，不涉及创建）
-        await self._ensure_page(bucket)
+        # 整个请求生命周期内把该桶标记为「活跃」：页面回收 / LRU 淘汰绝不关闭一条
+        # 正在处理请求的页面（哪怕它此刻还没拿到桶锁，见 page_pool._bucket_busy）。
+        self._mark_bucket_active(bucket)
+        try:
+            # 额外的会话桶需要自己的页面（默认桶就是 self.page，不涉及创建）
+            await self._ensure_page(bucket)
 
-        for attempt in range(1, max_attempts + 1):
-            state = self._state(bucket)
-            if state.pending_rotation:
-                # 体积超预算或上次检测到“到顶”：先轮转，再播种
-                await self._start_new_session(bucket)
-            elif attempt == 1:
-                pass
-            elif attempt < max_attempts:
-                print(f"[恢复] 第 {attempt}/{max_attempts} 次重试：恢复同一个会话……")
-                if not await self._recover_session(bucket):
-                    break
-                await asyncio.sleep(config.RETRY_BACKOFF_S * attempt)
-            else:
-                print("[恢复] 恢复同一会话无效，改为开启新会话并重放历史……")
-                await self._start_new_session(bucket)
+            for attempt in range(1, max_attempts + 1):
+                state = self._state(bucket)
+                if page_rebuilt:
+                    # 上一轮只是页面失效：页面已重建并回到同一条会话，重发即可。
+                    # 不能走下面的「恢复 / 换新会话」阶梯——那会把刚恢复的会话丢掉。
+                    page_rebuilt = False
+                elif state.pending_rotation:
+                    # 体积超预算或上次检测到“到顶”：先轮转，再播种
+                    await self._start_new_session(bucket)
+                elif attempt == 1:
+                    pass
+                elif attempt < max_attempts:
+                    print(f"[恢复] 第 {attempt}/{max_attempts} 次重试：恢复同一个会话……")
+                    if not await self._recover_session(bucket):
+                        break
+                    await asyncio.sleep(config.RETRY_BACKOFF_S * attempt)
+                else:
+                    print("[恢复] 恢复同一会话无效，改为开启新会话并重放历史……")
+                    await self._start_new_session(bucket)
 
-            # 会话是新开的（或被轮转过）-> 必须播种，否则模型收不到任何上下文
-            active_prompt = seeded if not self._state(bucket).has_history else prompt
-            # 先按字符预算截断再记录：sent_prompt / usage / 日志必须反映真正发出去的那份
-            active_prompt = self._clamp_prompt(active_prompt)
-            # 记录真正要发出的那份 prompt，供上层估算 usage（按桶隔离，避免并发串台）
-            self._last_prompts[bucket] = active_prompt
+                # 等锁 / 重试期间页面可能被关掉，每轮都确认一次它还活着
+                await self._ensure_page(bucket)
 
-            await self._remember_session(bucket)
-            try:
-                return await self._send_chat_locked(active_prompt, on_delta, key=bucket)
-            except DeepSeekContextLimitError as exc:
-                # 到顶了：下次不要再恢复同一个会话，直接轮转
-                last_error = exc
-                self._state(bucket).pending_rotation = True
-                print(f"[恢复] 第 {attempt}/{max_attempts} 次失败：会话已达上下文上限。")
-            except DeepSeekTimeoutError as exc:
-                # 只有「超时 / 到顶」才可重试；找不到输入框、profile 被占用等不可重试
-                last_error = exc
-                self._state(bucket).last_error = str(exc)
-                print(f"[恢复] 第 {attempt}/{max_attempts} 次失败：等待回复超时。")
+                # 会话是新开的（或被轮转过）-> 必须播种，否则模型收不到任何上下文
+                active_prompt = seeded if not self._state(bucket).has_history else prompt
+                # 先按字符预算截断再记录：sent_prompt / usage / 日志必须反映真正发出去的那份
+                active_prompt = self._clamp_prompt(active_prompt)
+                # 记录真正要发出的那份 prompt，供上层估算 usage（按桶隔离，避免并发串台）
+                self._last_prompts[bucket] = active_prompt
+
+                await self._remember_session(bucket)
+                try:
+                    return await self._send_chat_locked(active_prompt, on_delta, key=bucket)
+                except DeepSeekContextLimitError as exc:
+                    # 到顶了：下次不要再恢复同一个会话，直接轮转
+                    last_error = exc
+                    self._state(bucket).pending_rotation = True
+                    print(f"[恢复] 第 {attempt}/{max_attempts} 次失败：会话已达上下文上限。")
+                except DeepSeekTimeoutError as exc:
+                    # 只有「超时 / 到顶 / 页面失效」才可重试；找不到输入框、profile 被占用等不可重试
+                    last_error = exc
+                    self._state(bucket).last_error = str(exc)
+                    print(f"[恢复] 第 {attempt}/{max_attempts} 次失败：等待回复超时。")
+                except DeepSeekPageLostError as exc:
+                    # 标签被用户关掉 / 渲染进程崩溃 / 被浏览器回收：**可自愈**。
+                    # 网页会话本身还在（上下文没丢），重建页面后回到同一条会话重发即可。
+                    # 为什么必须能自愈：以前这种情况被当成“选择器没命中”，页面池里的
+                    # 死页面永远不会被替换，该会话桶会一直瞬间 502 直到进程重启。
+                    last_error = exc
+                    self._state(bucket).last_error = str(exc)
+                    print(f"[恢复] 第 {attempt}/{max_attempts} 次失败：{exc}")
+                    if attempt < max_attempts:
+                        await self._rebuild_page(bucket, "页面在请求中失效")
+                        page_rebuilt = True
+        finally:
+            self._unmark_bucket_active(bucket)
 
         if last_error is not None:
             raise last_error
@@ -131,6 +161,27 @@ class ChatIOMixin:
     """
 
     _COMPOSER_CONNECTED_JS = "(el) => !!el.isConnected"
+
+    # 找不到输入框时的现场信息（**不回显对话正文**）：URL / 就绪状态 / 候选选择器命中
+    # 数量 / 是否像登录墙 / 是否有弹层。用来把「反正就是找不到」变成可定位的证据。
+    _PAGE_DIAG_JS = """
+    () => {
+      const text = (document.body && (document.body.innerText || '')) || '';
+      const head = text.slice(0, 2000);
+      return JSON.stringify({
+        url: location.href,
+        ready: document.readyState,
+        title: (document.title || '').slice(0, 60),
+        textarea: document.querySelectorAll('textarea').length,
+        contenteditable: document.querySelectorAll('[contenteditable="true"]').length,
+        visible_inputs: Array.from(document.querySelectorAll('input')).filter(
+          (el) => el.getBoundingClientRect().height > 0).length,
+        dialogs: document.querySelectorAll('[role="dialog"]').length,
+        login_like: /(\\u767b\\u5f55|\\u767b\\u9646|log\\s?in|sign\\s?in)/i.test(head),
+        body_chars: text.length,
+      });
+    }
+    """
 
     # 判断“这条 prompt 是否已经出现在页面对话区”：textarea 的 value 不进
     # innerText，但 contenteditable 的正文会。这里把输入框**临时隐藏**再读整页
@@ -248,20 +299,57 @@ class ChatIOMixin:
     def _fill_timeout_s(self) -> float:
         return max(0.1, (config.FILL_TIMEOUT_MS or 10000) / 1000.0)
 
+    @staticmethod
+    def _page_lost_message(bucket: Optional[str] = None) -> str:
+        """页面已失效时的可操作文案（与「选择器失效 / 未登录」区分开）。"""
+        where = f"key={bucket}，" if bucket else ""
+        return (
+            f"会话页面的浏览器标签已失效（{where}被关闭 / 渲染进程崩溃 / 被浏览器回收），"
+            "无法再驱动它。桥会重建该页面并回到同一条会话后重试；"
+            "若持续出现，请不要手动关闭自动弹出的 Chromium 标签。"
+        )
+
+    async def _page_diag(self, page) -> str:
+        """找不到输入框时的现场信息（best-effort；**不回显对话正文**）。
+
+        以前这里只有一句「请检查 DeepSeek 网页是否打开或处于登录状态」：页面明明在、
+        但停在别的视图（或被弹层遮住）时，用户完全无从下手。现场信息（URL / 就绪
+        状态 / 各候选选择器命中数 / 是否像登录墙 / 是否有弹层）才能定位根因。
+        """
+        if page is None:
+            return "页面不存在"
+        if not self._page_is_alive(page):
+            return "页面已失效（标签被关闭 / 崩溃）"
+        try:
+            return str(await page.evaluate(self._PAGE_DIAG_JS))
+        except Exception as exc:  # noqa: BLE001 诊断本身绝不能抛错
+            return f"（页面信息不可读：{type(exc).__name__}）"
+
     async def _locate_input(self, page, rounds: int = 3, timeout_ms: int = 2000):
         """定位对话输入框：最多 ``rounds`` 轮 × 逐个候选选择器，只做 DOM 查询。
 
         绝不 bring_to_front / 抢 OS 焦点：提交走页面内事件（见 ``_submit_prompt``），
         本就不依赖窗口是否在前台。验证提交时用更小的 ``rounds`` / ``timeout_ms``
         （页面在那里必须立即答复，不能把轮询拖成长任务）。
+
+        **页面已失效时抛 ``DeepSeekPageLostError``**，而不是当成「选择器没命中」：
+        标签被关闭 / 渲染进程崩溃时 ``wait_for_selector`` 会**立刻**抛错，以前会被
+        归入「找不到输入框」并给出误导性的“请检查是否登录”，而且永远不会自愈。
+        专用异常让 ``send_chat`` 知道该重建页面（这条故障可以自动恢复）。
         """
+        if page is None:
+            return None
         for _round in range(max(1, rounds)):
+            if not self._page_is_alive(page):
+                raise DeepSeekPageLostError(self._page_lost_message())
             for selector in config.INPUT_SELECTORS:
                 try:
                     node = await page.wait_for_selector(selector, timeout=timeout_ms)
                     if node:
                         return node
-                except Exception:  # noqa: BLE001 选择器未命中 / 超时
+                except Exception as exc:  # noqa: BLE001 选择器未命中 / 超时 / 页面失效
+                    if self._looks_like_page_lost(exc) or not self._page_is_alive(page):
+                        raise DeepSeekPageLostError(self._page_lost_message()) from exc
                     continue
         return None
 
@@ -957,13 +1045,22 @@ class ChatIOMixin:
         state = self._state(bucket)
         # 默认所有桶共用 self.lock（串行）；只有 PARALLEL_BUCKETS=true 才按桶各持一把锁
         async with self._session_lock(bucket):
+            page = self._page_for(bucket)  # 等锁期间可能已被判活重建过，必须重新取
             if page is None:
                 raise RuntimeError("浏览器尚未初始化：找不到可用于发送的会话页面。")
+            if not self._page_is_alive(page):
+                # 页面已失效：抛专用异常，让 send_chat 重建页面后重试（可自愈）
+                raise DeepSeekPageLostError(self._page_lost_message(bucket))
             self._touch_page(bucket)  # 正在用的页面不会被空闲回收 / LRU 淘汰
             # 1. 先确认输入框存在（快速失败，给出明确的“没登录/没打开”提示）；
             #    真正写入时还会在 _fill_prompt 里**每次尝试重新定位一次**。
             if not await self._locate_input(page):
-                raise RuntimeError("无法找到对话输入框，请检查 DeepSeek 网页是否打开或处于登录状态。")
+                raise RuntimeError(
+                    "无法找到对话输入框（key={}）：{}。常见原因：页面停在非对话视图、"
+                    "登录态失效、或有弹层遮挡；若是页面刚被关闭，下一次请求会自动重建。".format(
+                        bucket, await self._page_diag(page)
+                    )
+                )
 
             # 记录发送前最后一条回复的文本，用来判断“新回复是否已经出现”。
             # 注意：绝不能用“回复节点数量变多”来判断。
@@ -1040,7 +1137,16 @@ class ChatIOMixin:
 
             while True:
                 poll += 1
-                responses = await page.query_selector_all(config.RESPONSE_SELECTORS)
+                # 页面在生成过程中被关掉 / 崩溃：抛专用异常（而不是让 TargetClosed 这类
+                # 非 RuntimeError 冒到路由层变成裸 500），由 send_chat 决定重建与重试。
+                if not self._page_is_alive(page):
+                    raise DeepSeekPageLostError(self._page_lost_message(bucket))
+                try:
+                    responses = await page.query_selector_all(config.RESPONSE_SELECTORS)
+                except Exception as exc:  # noqa: BLE001 页面失效 / 导航中
+                    if self._looks_like_page_lost(exc) or not self._page_is_alive(page):
+                        raise DeepSeekPageLostError(self._page_lost_message(bucket)) from exc
+                    raise
                 current_text = ""
                 generating = None
                 if responses:
@@ -1212,8 +1318,17 @@ class ChatIOMixin:
             await self._remember_session(bucket)
             return last_text, extracted_blocks
 
+    @staticmethod
     def save_extracted_files(raw_text: str, code_blocks: List[dict], output_dir: str) -> List[str]:
-        """将提取的代码落地为对应格式的文件"""
+        """将提取的代码落地为对应格式的文件。
+
+        **必须是 staticmethod**：调用方（server 的非流式分支）按
+        ``driver.save_extracted_files(raw, blocks, dir)`` 三个位置参数调用。
+        缺少 ``self`` / 缺少 ``@staticmethod`` 时，实例访问会把 self 占掉一个位置，
+        导致每次成功生成后都在这里抛
+        ``TypeError: takes 3 positional arguments but 4 were given``——
+        整轮回复白做，客户端只看到 500。
+        """
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         saved = []
 
