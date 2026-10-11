@@ -153,6 +153,16 @@ class PagePoolMixin:
     def _touch_page(self, key: Optional[str] = None) -> None:
         self._page_last_used[key or DEFAULT_SESSION_KEY] = time.monotonic()
 
+    def _other_request_in_flight(self, bucket: str) -> bool:
+        """是否有**别的**请求正在用这个桶（不含当前这次调用）。
+
+        为什么不能直接用 ``_bucket_busy``：它会把调用方自己也算成忙（``send_chat``
+        在 ``_ensure_page`` 之前就标记了活跃），于是「我要不要动页面」永远为真。
+        这里用「桶锁被别人持有」+「活跃计数 > 1」判断，两个窗口都盖到：
+        已在生成的请求持着锁；刚进入 ``_ensure_page``、还没拿到锁的请求靠计数。
+        """
+        return self._lock_for(bucket).locked() or self._active_counts.get(bucket, 0) > 1
+
     def _bucket_busy(self, bucket: str) -> bool:
         """该桶是否有请求在飞（正在生成，或已进入 send_chat 但还没拿到锁）。
 
@@ -227,9 +237,81 @@ class PagePoolMixin:
             return False
 
     def _bucket_target(self, bucket: str) -> str:
-        """该桶下次打开页面时应落到的地址（上次的会话；已到顶则回首页开新会话）。"""
+        """该桶下次打开页面时应落到的地址。
+
+        优先级：已到顶 -> 首页（必须换新会话）；否则 ``/bridge session link`` 绑定的
+        会话 -> 上次的会话 -> 首页。绑定优先是它的全部意义：页面丢失重建、启动恢复、
+        空闲回收后重开都必须回到用户指定的那条会话，不能漂到陌生会话去。
+        """
         state = self._state(bucket)
-        return HOME_URL if state.cap_hit else (state.url or HOME_URL)
+        if state.cap_hit:
+            return HOME_URL
+        return state.linked_url or state.url or HOME_URL
+
+    # ---- /bridge session link|unlink：把桶固定到用户指定的网页会话 ----
+    async def link_session(
+        self, url: str, seed: bool = False, key: Optional[str] = None
+    ) -> None:
+        """把某个会话桶绑定到指定网页会话（``/bridge session link``）。
+
+        * ``seed=False``（默认）：认为该会话**已有**此前上下文，之后只发增量；
+        * ``seed=True``：用持久化的 ``pending_reseed`` 明确要求下一轮把完整历史播种
+          进去（那条会话里其实没有此前记录时用；代价是历史在网页端重复一遍）。
+
+        绑定必须**立即生效**：页面已经开着、却停在别的会话上时重建它落到绑定会话；
+        页面尚未打开时则交给 ``_bucket_target`` 惰性创建时落到绑定会话；
+        如果该桶正在生成回复（没拿到桶锁就换页会打断那一轮），则留给下一轮发送之前的
+        ``_align_linked_page`` 兜底，保证绑定最终一定生效。
+        """
+        bucket = key or DEFAULT_SESSION_KEY
+        state = self._state(bucket)
+        state.linked_url = url
+        state.pending_rotation = False
+        state.cap_hit = False
+        state.pending_reseed = bool(seed)
+        state.has_history = not seed
+        state.last_error = None
+        self._save_session_state(key=bucket)
+        page = self._page_for(bucket)
+        if not self._page_is_alive(page) or self._current_session_url(bucket) == url:
+            return
+        if self._bucket_busy(bucket):
+            print(f"[会话] key={bucket} 正在处理请求，绑定将在下一轮发送前生效：{url}")
+            return
+        await self._rebuild_page(bucket, "会话绑定已变更")
+        print(f"[会话] 已把 key={bucket} 的页面切换到绑定的会话：{url}")
+
+    async def _align_linked_page(self, bucket: str) -> None:
+        """把已存在的页面重新对齐到绑定的会话（页面尚未打开则什么都不做）。
+
+        为什么需要它：``link_session`` 在桶正忙时不能当场换页（会打断正在生成的回复），
+        因此把「换到绑定会话」延到下一轮发送之前。这里只在真的不一致时才重建，
+        惰性创建（``_bucket_target``）已经覆盖了页面不存在的情形。
+        """
+        state = self._state(bucket)
+        if not state.linked_url or not self._page_is_alive(self._page_for(bucket)):
+            return
+        if self._current_session_url(bucket) == state.linked_url:
+            return
+        if self._other_request_in_flight(bucket):
+            # 别的请求正在用这条页面：换页会把它手里那一轮弄断，留到再下一轮
+            print(f"[会话] key={bucket} 尚有请求在跑，绑定延后生效：{state.linked_url}")
+            return
+        await self._rebuild_page(bucket, "会话绑定已变更")
+
+    def unlink_session(self, key: Optional[str] = None) -> bool:
+        """解除某个会话桶的绑定，返回此前是否有绑定。
+
+        只解除「固定到这条会话」的约束，**不动当前页面**：上下文还在，用户只是不再
+        被钉在这条会话上（要一条全新会话请用 ``/bridge session reset``）。
+        """
+        bucket = key or DEFAULT_SESSION_KEY
+        state = self._state(bucket)
+        had = bool(state.linked_url)
+        state.linked_url = None
+        state.pending_reseed = False
+        self._save_session_state(key=bucket)
+        return had
 
     async def _create_bucket_page(self, bucket: str) -> None:
         """创建某个会话桶的页面并回到它上次的会话。
@@ -327,13 +409,16 @@ class PagePoolMixin:
         bucket = key or DEFAULT_SESSION_KEY
         if bucket == DEFAULT_SESSION_KEY:
             await self._ensure_default_page()
+            await self._align_linked_page(bucket)
             return
         page = self._pages.get(bucket)
         if page is not None and self._page_is_alive(page):
+            await self._align_linked_page(bucket)
             return
         async with self._page_lock:
             page = self._pages.get(bucket)  # 并发请求可能刚建好 / 刚重建过
             if page is not None and self._page_is_alive(page):
+                await self._align_linked_page(bucket)
                 return
             if page is not None:
                 # 页面已失效：先移出池子再重建（状态保留，仍回到同一条会话）

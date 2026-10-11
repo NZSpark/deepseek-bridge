@@ -10,7 +10,7 @@ from typing import Any, List, Optional, Tuple
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from . import config
+from . import bridge_commands, config
 from .driver import (
     DEFAULT_SESSION_KEY,
     DeepSeekBusyError,
@@ -18,6 +18,7 @@ from .driver import (
     DeepSeekTimeoutError,
     DeepSeekWebDriver,
 )
+from . import models as models_mod
 from .models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -25,13 +26,12 @@ from .models import (
     ChoiceMessage,
     ModelCard,
     ModelListResponse,
-    SUPPORTED_MODELS,
     Usage,
 )
 from .prompting import build_prompt, estimate_tokens
 from .responses import ResponsesRequest, handle_responses
 from . import tasks
-from .streaming import _stream_chat_completion
+from .streaming import _stream_bridge_reply, _stream_chat_completion
 from .toolcalls import _tool_names, parse_tool_calls, to_tool_call_models
 
 driver = DeepSeekWebDriver()
@@ -52,6 +52,18 @@ async def lifespan(app: FastAPI):
         )
     yield
     await driver.close()
+
+
+def _effective_save_files(request: ChatCompletionRequest, driver, bucket: str) -> bool:
+    """代码块是否落盘：请求体的 save_files > 当前桶偏好 > config.SAVE_FILES。
+
+    请求体没传该项时是 ``None``（没表态），再看桶偏好（``/bridge settings save-files``），
+    最后回退到全局配置。显式 true / false 永远优先。
+    """
+    if request.save_files is not None:
+        return bool(request.save_files)
+    preference = driver.save_files_preference(bucket)
+    return bool(config.SAVE_FILES if preference is None else preference)
 
 
 def _error_response(status_code: int, message: str, err_type: str):
@@ -316,11 +328,12 @@ async def root():
 
 @app.get("/v1/models", response_model=ModelListResponse)
 async def list_models():
-    """Pi (models.json) 会用该端点做模型发现。"""
-    candidates = {m["id"]: m for m in SUPPORTED_MODELS}
-    candidates.setdefault("deepseek-chat", {"id": "deepseek-chat"})
+    """Pi (models.json) 会用该端点做模型发现。
+
+    列表与 ``/bridge models`` 命令同源（``models.advertised_models``），避免两处漂移。
+    """
     return ModelListResponse(
-        data=[ModelCard(id=m["id"]) for m in candidates.values()]
+        data=[ModelCard(id=m["id"]) for m in models_mod.advertised_models()]
     )
 
 
@@ -403,7 +416,9 @@ async def chat_completions(
     if not request.messages:
         return _error_response(400, "messages 不能为空", "invalid_request_error")
 
-    if driver.page is None:
+    # 桥内命令（``/bridge ...``）不经过网页版，因此**浏览器没起来也要答**：
+    # 页面失效、初始化失败时它们正是用户唯一的排障入口。普通请求仍按下面的检查 503。
+    if driver.page is None and not bridge_commands.is_command(request.messages):
         return _error_response(
             503,
             "浏览器尚未就绪，请确认已完成登录、且没有另一个实例占用 user_data。"
@@ -415,6 +430,25 @@ async def chat_completions(
     session_key = _session_key(request, x_deepseek_session, user_agent)
     if config.DEBUG:
         print(f"[debug] session_key={session_key!r}")
+
+    # 桥内命令：由桥直接应答，**不发给网页版**。放在这里（而不是 driver 内）是为了：
+    # 一、命令不写任务快照（否则 `/bridge status` 会变成任务目标）；
+    # 二、两条协议路径与流式 / 非流式共用同一套识别与应答。
+    command_reply = await bridge_commands.handle_command(
+        request.messages, driver, session_key
+    )
+    if command_reply is not None:
+        if request.stream:
+            return StreamingResponse(
+                _stream_bridge_reply(request, command_reply),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+        return bridge_commands.command_completion_response(request.model, command_reply)
 
     # 任务快照：记录本轮 messages，供轮转播种时续接任务（不丢任务目标）。
     bucket = session_key or DEFAULT_SESSION_KEY
@@ -502,7 +536,7 @@ async def chat_completions(
         )
 
     saved_files = []
-    if request.save_files:
+    if _effective_save_files(request, driver, bucket):
         saved_files = driver.save_extracted_files(
             reply_content, code_blocks, request.output_dir or config.OUTPUT_DIR
         )

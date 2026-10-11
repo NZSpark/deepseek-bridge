@@ -18,6 +18,53 @@ def _chunk_text(text: str, size: int = 64) -> List[str]:
     return [text[i:i + size] for i in range(0, len(text), size)] or [""]
 
 
+async def _stream_bridge_reply(request: ChatCompletionRequest, reply: str):
+    """把桥内命令（``/bridge ...``）的应答编码成普通回复同形的 SSE 流。
+
+    命令由桥本地应答、**不经过网页版**：页面失效 / 浏览器未初始化时它也必须能用，
+    所以这里不发任何上游请求。usage 的 ``prompt_tokens`` 记 0（桥的应答不是网页版用量）。
+    """
+    chat_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    created = int(time.time())
+    model = request.model
+
+    def encode(delta: Optional[Dict[str, Any]], finish: Optional[str] = None) -> str:
+        payload = {
+            "id": chat_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{"index": 0, "delta": delta or {}, "finish_reason": finish}],
+        }
+        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    yield encode({"role": "assistant"})
+    for piece in _chunk_text(reply):
+        yield encode({"content": piece})
+    yield encode(None, finish="stop")
+
+    include_usage = isinstance(request.stream_options, dict) and bool(
+        request.stream_options.get("include_usage")
+    )
+    if include_usage:
+        completion_tokens = estimate_tokens(reply)
+        usage_payload = {
+            "id": chat_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": completion_tokens,
+                "total_tokens": completion_tokens,
+            },
+        }
+        yield f"data: {json.dumps(usage_payload, ensure_ascii=False)}\n\n"
+
+    yield "data: [DONE]\n\n"
+
+
 async def _stream_chat_completion(
     request: ChatCompletionRequest,
     prompt: str,

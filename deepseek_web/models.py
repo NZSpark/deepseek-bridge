@@ -55,7 +55,9 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: Optional[int] = None
     stop: Optional[Any] = None
     # ---- 本地扩展字段（Pi 不会传，保持默认即可）----
-    save_files: Optional[bool] = True
+    # None = 客户端没表态：由当前桶偏好（`/bridge settings save-files`）或 config.SAVE_FILES 决定；
+    # 显式 true / false 永远优先于两者。
+    save_files: Optional[bool] = None
     output_dir: Optional[str] = None  # None -> 使用 .env 的 OUTPUT_DIR
 
 
@@ -104,3 +106,14 @@ SUPPORTED_MODELS = [
     {"id": "deepseek-chat", "context_window": 65536},
     {"id": "deepseek-reasoner", "context_window": 65536},
 ]
+
+
+def advertised_models() -> List[Dict[str, Any]]:
+    """本桥对外公布的模型列表。
+
+    单一数据源：``GET /v1/models`` 与桥内命令 ``/bridge models`` 都读它，
+    避免帮助文本与真实列表漂移（见 doc/bridge_commands.md §models）。
+    """
+    candidates = {m["id"]: m for m in SUPPORTED_MODELS}
+    candidates.setdefault("deepseek-chat", {"id": "deepseek-chat"})
+    return list(candidates.values())

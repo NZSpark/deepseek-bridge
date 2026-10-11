@@ -10,6 +10,7 @@
 
 - **OpenAI 兼容接口**：完整实现 `/v1/models`、`/v1/chat/completions`，并额外提供 `/v1/responses`（OpenAI Responses API，供 **Codex CLI** 使用）；支持 `messages`、`tools`、`stream` 等标准字段；错误也以 OpenAI 兼容的 `error` 结构返回。
 - **可运维**：`GET /healthz` 健康检查、`HEADLESS` 无头模式、`/debug/dom` DOM 诊断端点（需 `DEEPSEEK_DEBUG=1`，且不回显正文）。
+- **Bridge 聊天命令**：直接在对话里发 `/bridge status` / `/bridge help` / `/bridge session reset` 等命令，由桥**本地应答**（不发给网页版）——页面失效、浏览器未初始化时依然可用，可查状态、开关代码落盘、重开 / 重新播种网页会话、把当前桶绑定到指定网页会话。见 [doc/bridge_commands.md](doc/bridge_commands.md)。
 - **会话生命周期**：自动识别网页版「对话长度上限」（不再伪装成超时），超预算时自动轮转到新会话，并**播种**已有上下文。
 - **按任务隔离会话**：显式 `X-DeepSeek-Session` / `user` 字段优先；缺失时按提示词里的**工作目录**自动分桶（两个 Pi 在两个目录里跑各自一条会话，无需配置），再按 `User-Agent` 隔离不同客户端；每个任务独立页面与状态。
 - **流式响应（SSE）**：以 `text/event-stream` 逐字吐出内容，兼容 OpenAI 流式解析器。
@@ -26,13 +27,13 @@
 
 | 指标 | 数值 |
 | --- | --- |
-| 生产代码行数（`deepseek_web/` 15 个模块） | **4,526** 行 |
+| 生产代码行数（`deepseek_web/` 16 个模块） | **5,672** 行 |
 | 入口文件 `deepseek_api_server.py` | 122 行 |
-| **生产代码合计** | **约 4,648 行** |
-| 测试代码行数（`tests/`，10 个文件） | **3,225** 行 |
-| 测试用例数量 | **236** 个（stdlib `unittest`，全部通过） |
-| 测试 / 生产代码比 | 约 **0.69 : 1** |
-| 最大的单个模块 | `chat_io.py`（1,252 行，浏览器输入 / 提交 / 解析核心） |
+| **生产代码合计** | **约 5,794 行** |
+| 测试代码行数（`tests/`，11 个文件） | **4,308** 行 |
+| 测试用例数量 | **307** 个（stdlib `unittest`，全部通过） |
+| 测试 / 生产代码比 | 约 **0.74 : 1** |
+| 最大的单个模块 | `chat_io.py`（1,374 行，浏览器输入 / 提交 / 解析核心） |
 | 提交次数 | 20 次 |
 | 开发周期 | 2026-10-02 ～ 2026-10-08（约 7 天） |
 
@@ -53,6 +54,7 @@
 │   ├── driver.py            #   Playwright 浏览器 Driver + 会话持久化
 │   ├── streaming.py         #   SSE 流式编码（Chat Completions）
 │   ├── responses.py         #   Responses API 兼容层（Codex CLI 专用，命名 SSE 事件）
+│   ├── bridge_commands.py   #   /bridge 聊天命令（识别 / 执行 / 应答）
 │   └── server.py            #   FastAPI 应用与路由
 ├── client_test.py           # 使用官方 openai SDK 测试本地服务的示例客户端
 ├── requirements.txt         # 运行时依赖（含 client_test.py 需要的 openai）
@@ -60,6 +62,7 @@
 ├── INSTALL.md               # 安装说明
 ├── tests/                   # 解析层、结束判定、会话生命周期、路由层的回归测试（stdlib unittest）
 ├── doc/update.md            # 项目改进建议与进度
+├── doc/bridge_commands.md   # /bridge 聊天命令的设计、语义与权限取舍
 ├── output/                  # 自动提取的代码 / 回复文件输出目录
 ├── user_data/               # Chromium 持久化用户目录（保存登录态，勿提交到 git）
 └── .venv/                   # Python 虚拟环境
@@ -141,7 +144,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | `stream` | bool | 是否流式返回，默认 `false` |
 | `tools` | array | OpenAI tools 描述，用于触发模拟 function calling |
 | `tool_choice` | any | 设为 `"none"` 可禁用工具调用 |
-| `save_files` | bool | **本地扩展**，是否把提取到的代码落盘，默认 `true` |
+| `save_files` | bool | **本地扩展**，是否把提取到的代码落盘；不传 = 按当前桶偏好（`/bridge settings save-files`）或 `SAVE_FILES` 配置（默认 `true`） |
 | `output_dir` | string | **本地扩展**，输出目录，默认 `./output` |
 
 其余标准字段（`reasoning_effort`、未知字段等）均会被接收，不会返回 422。
@@ -215,6 +218,46 @@ curl -X POST "http://127.0.0.1:8000/session/reset?session=pi-task-1"
 
 响应会返回该会话桶的状态快照（等同 `/healthz` 里的 `session` 字段）。
 
+### Bridge 聊天命令（`/bridge ...`）
+
+**本地扩展**：把一条命令直接发给任意一个模型端口（`/v1/chat/completions` 或
+`/v1/responses`），桥就会**自己应答**——命令不会发到 DeepSeek 网页版，因此页面失效、
+浏览器还没初始化（普通请求 503）时这些命令依然可用，正好用来排障。
+
+| 命令 | 作用 | 风险 |
+| --- | --- | --- |
+| `/bridge help [session\|settings]` | 列出命令 / 分主题帮助 | 只读 |
+| `/bridge status` | 桥接、浏览器与当前会话桶状态摘要 | 只读 |
+| `/bridge models` | 本桥对外公布的模型名（与 `GET /v1/models` 同源） | 只读 |
+| `/bridge session [status]` | 当前桶的会话状态摘要（含绑定、是否要播种、轮数） | 只读 |
+| `/bridge session reset` | 下一轮开新网页会话并播种完整历史 | 改状态 |
+| `/bridge session reseed` | 下一轮把完整历史再播种一遍（一次性标记，落盘） | 改状态 |
+| `/bridge session link <URL> [--seed]` | 把当前桶绑定到指定网页会话 | 改状态 |
+| `/bridge session unlink` | 解除当前桶的会话绑定 | 改状态 |
+| `/bridge settings save-files [on\|off\|default\|status]` | 按桶保存的代码块落盘偏好 | 改状态 |
+
+```bash
+# 看看桥还活着吗、请求会发到哪条会话（浏览器没起来也能答）
+curl http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"/bridge status"}]}'
+
+# 把某个任务桶固定到一条已有的 DeepSeek 会话（--seed：那条会话里其实没有此前记录）
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "X-DeepSeek-Session: pi-task-1" -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"/bridge session link https://chat.deepseek.com/a/chat/s/<会话 ID> --seed"}]}'
+```
+
+要点：
+
+- **只识别完整的独立消息**，且只看最后一条（必须是 `user`）——历史里的旧命令不会被重放。
+- **只作用于当前会话桶**，没有「指定别的桶」的参数；桶的判定同普通请求。
+- `session reset` 是「重开网页会话 + 播种历史」，**不是**删除客户端的对话历史。
+- `session reseed` 会**重发**上下文，那条网页会话里因此会出现重复内容。
+- `session link` 的地址必须是 `https` + `LINK_ALLOWED_HOSTS` 里的主机 + `/a/chat/s/<会话 ID>`，
+  也可以只发会话 ID；绑定后页面重建 / 重启都会回到这条会话，轮转会解除绑定。
+
+完整设计、语义与权限取舍见 [doc/bridge_commands.md](doc/bridge_commands.md)。
+
 ---
 
 ## 🛠 Function Calling 原理
@@ -250,7 +293,7 @@ DeepSeek 网页版不支持原生 function calling，本项目采用三步模拟
   - 超过 `SESSION_MAX_TURNS` / `SESSION_MAX_TOKENS`（默认 60 轮 / 6 万估算 token）时，下一轮自动**轮转**到新会话；
   - 轮转后会把**历史重新播种**进去（`SEED_MAX_CHARS` 控制字符预算，超出时保留最近的消息），所以轮转不会丢失任务上下文；
   - 网页版到顶时会弹出提示并停止响应，服务会识别它并返回 `context_length_exceeded`，而不是死等到超时；重试阶梯的**最后一级**就是“换新会话 + 重放历史”；
-  - 想手动换一个干净会话：`POST /session/reset`、设 `DEEPSEEK_NEW_SESSION=true` 后重启，或删除 `user_data/.deepseek_session`；
+  - 想手动换一个干净会话：在对话里发 `/bridge session reset`（只影响当前会话桶）、`POST /session/reset`、设 `DEEPSEEK_NEW_SESSION=true` 后重启，或删除 `user_data/.deepseek_session`；
   - 想知道当前会话涨到哪了：看 `GET /healthz` 的 `session` 字段（`turns` / `est_tokens` / `cap_hit` / `pending_rotation`）。
 - **按任务隔离会话**：服务为不同任务维护独立的网页会话与页面，上下文互不污染。任务标识按以下优先级确定：
   1. `X-DeepSeek-Session: <任务 id>` 请求头（可用 `SESSION_KEY_HEADER` 改名）；2. 请求体的 `user` 字段；3. **提示词里的工作目录**（`SESSION_SCOPING_BY_CWD`，默认开）；4. `User-Agent`（`SESSION_SCOPING_BY_UA`，默认开）。
@@ -283,7 +326,7 @@ DeepSeek 网页版不支持原生 function calling，本项目采用三步模拟
 .venv/bin/python -m unittest discover -s tests -t . -v
 ```
 
-共 236 个用例，覆盖解析层、结束判定、会话生命周期（播种 / 到顶 / 轮转 / 重试阶梯 / 会话桶 / 页面回收 / 锁）、模块结构、路由层，以及 **Responses API 兼容层**（请求映射 / 响应结构 / 命名 SSE 事件 / 工具调用 / 错误映射）。全部用假 page / 假 driver 驱动，不需要启动浏览器，也不需要额外依赖（只用标准库 unittest）。
+共 308 个用例，覆盖解析层、结束判定、会话生命周期（播种 / 到顶 / 轮转 / 重试阶梯 / 会话桶 / 页面回收 / 锁）、模块结构、路由层、**Responses API 兼容层**（请求映射 / 响应结构 / 命名 SSE 事件 / 工具调用 / 错误映射），以及 **Bridge 聊天命令**（精确匹配 / 参数与地址校验 / 浏览器未就绪时的只读命令 / 绑定与重新播种的一次性语义 / 落盘偏好优先级）。全部用假 page / 假 driver 驱动，不需要启动浏览器，也不需要额外依赖（只用标准库 unittest）。
 
 ---
 

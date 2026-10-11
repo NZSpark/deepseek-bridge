@@ -107,6 +107,10 @@ class FakeDriver:
         self.saved.append((raw_text, code_blocks, output_dir))
         return ["/tmp/fake.md"]
 
+    def save_files_preference(self, key=None):
+        # 未做设置时返回 None = 跟随 config.SAVE_FILES（旧行为：默认落盘）
+        return None
+
 
 class RouteTestCase(unittest.TestCase):
     def setUp(self):

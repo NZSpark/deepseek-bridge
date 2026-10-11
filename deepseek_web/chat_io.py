@@ -100,8 +100,13 @@ class ChatIOMixin:
                 # 等锁 / 重试期间页面可能被关掉，每轮都确认一次它还活着
                 await self._ensure_page(bucket)
 
-                # 会话是新开的（或被轮转过）-> 必须播种，否则模型收不到任何上下文
-                active_prompt = seeded if not self._state(bucket).has_history else prompt
+                # 会话是新开的（或被轮转过）-> 必须播种，否则模型收不到任何上下文。
+                # ``pending_reseed``（`/bridge session reseed`）同样要求这一轮重播完整历史，
+                # 即使当前会话已经有上下文（这正是它的用途：网页与客户端上下文失配）。
+                bucket_state = self._state(bucket)
+                active_prompt = (
+                    seeded if (bucket_state.pending_reseed or not bucket_state.has_history) else prompt
+                )
                 # 先按字符预算截断再记录：sent_prompt / usage / 日志必须反映真正发出去的那份
                 active_prompt = self._clamp_prompt(active_prompt)
                 # 记录真正要发出的那份 prompt，供上层估算 usage（按桶隔离，避免并发串台）
@@ -1302,6 +1307,8 @@ class ChatIOMixin:
 
             # 4. 更新会话状态：已建立历史，并累计体积；超预算则下一轮轮转
             state.has_history = True
+            # 一次性标记已兑现：``/bridge session reseed`` 只在下一轮重播一次历史
+            state.pending_reseed = False
             state.turns += 1
             state.est_tokens += estimate_tokens(prompt) + estimate_tokens(last_text)
             state.last_error = None

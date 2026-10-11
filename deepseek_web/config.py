@@ -159,6 +159,14 @@ SEND_BUTTON_SELECTORS = [
 # ==================== 会话生命周期 ====================
 # 启动时忽略已保存的会话，直接开一个新会话。搭配“播种”使用才安全（首轮会重放历史）。
 NEW_SESSION_ON_START = env_bool("DEEPSEEK_NEW_SESSION")
+# 会话绑定（`/bridge session link <URL>`）允许绑定的站点（"||" 分隔多个主机名）。
+# 与 SESSION_URL_RE 一起构成「是不是一条本项目的会话地址」的校验；
+# 不要为了扩展命令而放宽这里，否则用户可控的 URL 会变成导航目标。
+LINK_ALLOWED_HOSTS = [
+    h.strip().lower()
+    for h in env_str("LINK_ALLOWED_HOSTS", "chat.deepseek.com").split("||")
+    if h.strip()
+]
 # 「会话到顶」提示语的匹配规则（"||" 分隔多条正则，大小写不敏感）。
 # 网页版到顶时会弹提示并停止响应，必须能与“真的卡住”区分开。
 CAP_NOTICE_PATTERNS = [
@@ -220,6 +228,9 @@ BUCKET_LOCK_TIMEOUT_S = env_float("BUCKET_LOCK_TIMEOUT_S", 0)
 READY_TIMEOUT_MS = env_int("READY_TIMEOUT_MS", 15000)
 # 播种（新会话时重放历史）的最大字符数预算；超出时保留最近的消息
 SEED_MAX_CHARS = env_int("SEED_MAX_CHARS", 12000)
+# 代码块落盘的全局默认（`/bridge settings save-files` 的「跟随全局配置」）。
+# 优先级：请求体的 save_files 字段 > 当前桶偏好 > 这里。请求体没传该项时才看后两者。
+SAVE_FILES = env_bool("SAVE_FILES", True)
 # 网页会话超过以下任一阈值后，下一轮自动轮转到新会话（0 表示禁用该维度）
 SESSION_MAX_TURNS = env_int("SESSION_MAX_TURNS", 60)
 SESSION_MAX_TOKENS = env_int("SESSION_MAX_TOKENS", 60000)

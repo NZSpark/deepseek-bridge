@@ -16,14 +16,27 @@ from .errors import DEFAULT_SESSION_KEY, HOME_URL
 
 @dataclass
 class SessionState:
-    """单个会话桶的状态。会话的“是否新开 / 能否复用”都由它决定。"""
+    """单个会话桶的状态。会话的“是否新开 / 能否复用”都由它决定。
+
+    除会话生命周期外，还承载 ``/bridge`` 命令的按桶状态：
+
+    * ``linked_url``：``/bridge session link`` 绑定的网页会话（页面（重）建、启动恢复
+      都优先落到它上面）；
+    * ``pending_reseed``：``/bridge session reseed`` 排队的一次性标记——下一轮把完整
+      历史再播种一遍（落盘，重启 / 并发都不会丢，发送成功后清除）；
+    * ``save_files``：代码块落盘偏好（``/bridge settings save-files``，None = 跟随
+      ``config.SAVE_FILES``）。
+    """
 
     url: Optional[str] = None
+    linked_url: Optional[str] = None
     has_history: bool = False
     turns: int = 0
     est_tokens: int = 0
     cap_hit: bool = False
     pending_rotation: bool = False
+    pending_reseed: bool = False
+    save_files: Optional[bool] = None
     last_error: Optional[str] = None
     updated_at: int = 0
 
@@ -38,7 +51,13 @@ class SessionState:
         url = payload.get("url")
         if isinstance(url, str):
             state.url = url
-        for name in ("has_history", "cap_hit", "pending_rotation"):
+        linked = payload.get("linked_url")
+        if isinstance(linked, str) and linked:
+            state.linked_url = linked
+        save_files = payload.get("save_files")
+        if isinstance(save_files, bool):
+            state.save_files = save_files
+        for name in ("has_history", "cap_hit", "pending_rotation", "pending_reseed"):
             if name in payload:
                 setattr(state, name, bool(payload.get(name)))
         for name in ("turns", "est_tokens", "updated_at"):
@@ -206,8 +225,16 @@ class SessionStoreMixin:
             pass
 
     def _saved_session_url(self, key: Optional[str] = None) -> Optional[str]:
-        """读取已保存的会话地址（若存在且合法）。"""
-        url = self._load_session_state(key).get("url")
+        """读取已保存的会话地址（若存在且合法）。
+
+        ``/bridge session link`` 绑定过时优先返回绑定地址：绑定就是「这条桶必须回到
+        这条会话」的意思，页面丢失重建、启动恢复都不得漂到别的会话去。
+        """
+        data = self._load_session_state(key)
+        linked = data.get("linked_url")
+        if isinstance(linked, str) and config.SESSION_URL_RE.fullmatch(linked):
+            return linked
+        url = data.get("url")
         if isinstance(url, str) and config.SESSION_URL_RE.fullmatch(url):
             return url
         return None
@@ -221,11 +248,16 @@ class SessionStoreMixin:
         return sorted({DEFAULT_SESSION_KEY, *self._sessions})
 
     def needs_seed(self, key: Optional[str] = None) -> bool:
-        """某个会话桶的网页会话里没有可用上下文时，需要把完整历史播种进去。"""
-        return not self._state(key).has_history
+        """某个会话桶的网页会话里没有可用上下文时，需要把完整历史播种进去。
+
+        两种情形都要播种：网页会话本来就没有历史（新开 / 轮转后），或用户用
+        ``/bridge session reseed`` 明确要求下一轮把完整历史再发一遍（一次性标记）。
+        """
+        state = self._state(key)
+        return state.pending_reseed or not state.has_history
 
     def session_stats(self, key: Optional[str] = None) -> Dict[str, Any]:
-        """供 /healthz 观察会话增长情况。"""
+        """供 /healthz 与 ``/bridge`` 命令观察会话增长情况。"""
         state = self._state(key)
         return {
             "url": self._current_session_url(key),
@@ -235,9 +267,35 @@ class SessionStoreMixin:
             "est_tokens": state.est_tokens,
             "cap_hit": state.cap_hit,
             "pending_rotation": state.pending_rotation,
+            "pending_reseed": state.pending_reseed,
+            "linked_url": state.linked_url,
+            "save_files": state.save_files,
             "last_error": state.last_error,
             "buckets": self.session_keys(),
         }
+
+    # ---------- /bridge 命令用到的按桶状态 ----------
+    def linked_session_url(self, key: Optional[str] = None) -> Optional[str]:
+        """该桶通过 ``/bridge session link`` 绑定的网页会话（未绑定 = None）。"""
+        return self._state(key).linked_url
+
+    def reseed_session(self, key: Optional[str] = None) -> None:
+        """排队「下一轮重新播种完整历史」：一次性标记，落盘后可跨重启 / 并发。"""
+        bucket = key or DEFAULT_SESSION_KEY
+        self._state(bucket).pending_reseed = True
+        self._save_session_state(key=bucket)
+        print(f"[会话] 已排队 key={bucket} 的重新播种，下一轮将重发完整历史。")
+
+    def save_files_preference(self, key: Optional[str] = None) -> Optional[bool]:
+        """该桶的代码块落盘偏好（None = 跟随 config.SAVE_FILES）。"""
+        return self._state(key).save_files
+
+    def set_save_files_preference(self, value: Optional[bool], key: Optional[str] = None) -> None:
+        """写入该桶的落盘偏好（None = 回到跟随全局配置）。"""
+        bucket = key or DEFAULT_SESSION_KEY
+        state = self._state(bucket)
+        state.save_files = None if value is None else bool(value)
+        self._save_session_state(key=bucket)
 
     def _session_over_budget(self, key: Optional[str] = None) -> bool:
         """会话体积是否已达到轮转阈值（0 表示禁用该维度）。"""
@@ -261,7 +319,13 @@ class SessionStoreMixin:
         state.est_tokens = 0
         state.cap_hit = False
         state.pending_rotation = False
+        state.pending_reseed = False
         state.last_error = None
+        if state.linked_url:
+            # 轮转 = 换一条全新的网页会话；绑定的旧会话（多半已到顶 / 已失效）留着
+            # 只会让下一次页面重建又漂回去，因此明确解除并告知。
+            state.linked_url = None
+            print("[轮转] 会话绑定已解除（轮转需要全新的网页会话）。")
         self._save_session_state(clear_url=True, key=key)
         print("[轮转] 已开启新的网页会话（本轮会用完整历史播种上下文）。")
 
@@ -276,6 +340,9 @@ class SessionStoreMixin:
         state.pending_rotation = True
         state.cap_hit = False
         state.has_history = False
+        state.pending_reseed = False
+        # 重置的语义就是「开一条全新的网页会话」，与「绑定到某条指定会话」互斥
+        state.linked_url = None
         self._save_session_state(clear_url=True, key=bucket)
         print(f"[会话] 已请求重置 key={bucket} 的会话，下一轮将开启新会话并播种上下文。")
 
