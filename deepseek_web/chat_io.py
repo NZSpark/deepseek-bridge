@@ -13,7 +13,9 @@
 
 import asyncio
 import contextlib
+import json
 import re
+import time
 
 from . import config
 from .errors import (
@@ -23,6 +25,7 @@ from .errors import (
     DeepSeekTimeoutError,
 )
 from .prompting import _delta_piece, estimate_tokens
+from .token_speed import SpeedTiming, compute_speed
 
 #: prompt 头部至少要这么长才值得作为「这段 prompt 已经出现」的证据（太短会误命中）。
 _PRESENCE_MIN_CHARS = 12
@@ -1104,6 +1107,10 @@ class ChatIOMixin:
             #     可操作的错误，而不是让客户端干等到 RESPONSE_TIMEOUT_S。
             chat_input = await self._fill_prompt(page, prompt)
             await self._submit_prompt(page, chat_input, bucket, prompt=prompt)
+            # 从确认提交后计时；只保留时间戳和最终的数字指标，不记录正文。
+            submitted_at = time.monotonic()
+            first_text_at: float | None = None
+            settle_credit_s = 0.0
 
             # 2. 轮询等待回复完成
             await asyncio.sleep(config.POLL_INTERVAL_S)
@@ -1198,6 +1205,13 @@ class ChatIOMixin:
                     or (len(responses) > before_count)
                     or saw_generating
                 )
+                # 首次可见非空的新回复文本，是网页可观测 TTFT 的代理点。
+                # 不能仅因生成状态出现就计时：此时 DOM 可能仍显示上一轮回复。
+                has_new_text = bool(normalized) and (
+                    normalized != before_text or len(responses) > before_count
+                )
+                if first_text_at is None and reply_seen and has_new_text:
+                    first_text_at = time.monotonic()
 
                 # 1.1 还没有新回复时，周期性检查是否“会话到顶”。
                 #     到顶与“真的卡住”在外表上完全一样（页面不再产生新回复），
@@ -1253,6 +1267,9 @@ class ChatIOMixin:
                         threshold = config.STABLE_POLLS if same_text else config.LEN_STABLE_POLLS
                         if stable_count >= threshold:
                             last_text = current_text
+                            # 稳定轮询本身会引入检测延迟。只将实际经历的稳定判定
+                            # 轮询周期作为保守修正，compute_speed 会将其限制在 decode 时长内。
+                            settle_credit_s += max(0.0, config.POLL_INTERVAL_S) * max(0, threshold)
                             if await _maybe_continue():
                                 await asyncio.sleep(config.POLL_INTERVAL_S)
                                 continue
@@ -1310,6 +1327,26 @@ class ChatIOMixin:
                     )
 
                 await asyncio.sleep(config.POLL_INTERVAL_S)
+
+            # 记录网页可观测的速度指标。仅输出字符/token 计数和时长，不含 prompt / reply 正文。
+            finished_at = time.monotonic()
+            speed = compute_speed(
+                prompt=prompt,
+                reply=last_text,
+                timing=SpeedTiming(
+                    submitted_at=submitted_at,
+                    first_text_at=first_text_at,
+                    finished_at=finished_at,
+                    poll_interval_s=config.POLL_INTERVAL_S,
+                    settle_credit_s=settle_credit_s,
+                    saw_generating=saw_generating,
+                    streamed=bool(streamed),
+                ),
+            )
+            metric_json = json.dumps(
+                speed.to_dict(), ensure_ascii=False, separators=(",", ":")
+            )
+            print("[测速] " + metric_json)
 
             # 3. 从最新回复节点中提取代码块
             extracted_blocks = await self._extract_code_blocks(latest_node)
