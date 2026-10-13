@@ -22,8 +22,6 @@ class TokenSpeed:
     decode_adj_s: float = 0.0
     prefill_tps: float = 0.0
     decode_tps: float = 0.0
-    e2e_ttft_s: float | None = None
-    e2e_decode_tps: float | None = None
     settle_credit_s: float = 0.0
     poll_credit_s: float = 0.0
     bridge_overhead_ratio: float | None = None
