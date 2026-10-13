@@ -224,6 +224,7 @@ curl -X POST "http://127.0.0.1:8000/session/reset?session=pi-task-1"
 | `/bridge help [session]` | 列出命令 / 分主题帮助 | 只读 |
 | `/bridge status` | 桥接、浏览器与当前会话桶状态摘要 | 只读 |
 | `/bridge models` | 本桥对外公布的模型名（与 `GET /v1/models` 同源） | 只读 |
+| `/bridge token` | 最近一轮与本桶平均的 token 速度（prefill/decode） | 只读 |
 | `/bridge session [status]` | 当前桶的会话状态摘要（含绑定、是否要播种、轮数） | 只读 |
 | `/bridge session reset` | 下一轮开新网页会话并播种完整历史 | 改状态 |
 | `/bridge session reseed` | 下一轮把完整历史再播种一遍（一次性标记，落盘） | 改状态 |

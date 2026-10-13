@@ -285,6 +285,45 @@ class SessionStateTests(SessionTestCase):
         stats = driver.session_stats()
         for key in ("url", "has_history", "needs_seed", "turns", "est_tokens", "cap_hit"):
             self.assertIn(key, stats)
+        self.assertIn("speed", stats)
+
+    def test_speed_stats_empty_until_first_sample(self):
+        driver = self.driver_for(FakePage())
+        stats = driver.speed_stats()
+        self.assertEqual(stats["samples"], 0)
+        self.assertIsNone(stats["last"])
+        self.assertEqual(stats["prefill_tps_avg"], 0.0)
+
+    def test_note_speed_accumulates_and_persists_without_text(self):
+        page = FakePage()
+        driver = self.driver_for(page)
+        body_prompt = "很机密的提示词不该落盘"
+        body_reply = "很机密的回复正文不该落盘"
+        driver.note_speed({"prefill_tps": 1000.0, "decode_tps": 50.0, "ttft_s": 3.0,
+                           "decode_s": 8.0, "prompt_chars": len(body_prompt),
+                           "reply_chars": len(body_reply)})
+        driver.note_speed({"prefill_tps": 1200.0, "decode_tps": 60.0, "ttft_s": 4.0,
+                           "decode_s": 10.0, "prompt_chars": len(body_prompt),
+                           "reply_chars": len(body_reply)})
+        stats = driver.speed_stats()
+        self.assertEqual(stats["samples"], 2)
+        self.assertAlmostEqual(stats["prefill_tps_avg"], 1100.0)
+        self.assertAlmostEqual(stats["decode_tps_avg"], 55.0)
+        self.assertAlmostEqual(stats["ttft_s_avg"], 3.5)
+        # 落盘只含数值和与最近一轮数值快照，不含任何对话正文
+        raw = self._tmp.read_text(encoding="utf-8")
+        self.assertNotIn(body_prompt, raw)
+        self.assertNotIn(body_reply, raw)
+        # 新实例从磁盘恢复
+        other = self.driver_for(FakePage())
+        self.assertEqual(other.speed_stats()["samples"], 2)
+
+    def test_speed_stats_are_isolated_per_bucket(self):
+        driver = self.driver_for(FakePage())
+        driver.note_speed({"prefill_tps": 100.0, "decode_tps": 10.0, "ttft_s": 1.0,
+                           "decode_s": 1.0}, key="bucket-a")
+        self.assertEqual(driver.speed_stats("bucket-a")["samples"], 1)
+        self.assertEqual(driver.speed_stats("bucket-b")["samples"], 0)
 
 
 class RotationTests(SessionTestCase):

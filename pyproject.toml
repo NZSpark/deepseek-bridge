@@ -95,3 +95,6 @@ ignore = [
 # 而 S310 关心的是「scheme 可能不是 http(s)」——这个前置条件在 open_url() 里已经**真的做出来**
 # （非 http/https 直接拒绝），所以这里按文件豁免一次，而不是散落 4 处行内 noqa。
 "tests/e2e/test_bridge_contract.py" = ["S310"]
+# 命令测试里的假 driver：构造参数是「本桶各状态的开关」，用关键字参数显式传比拆成
+# 一个 dataclass 更直白；这里是测试替身、不是生产接口，参数多不是设计问题。
+"tests/test_bridge_commands.py" = ["PLR0913"]

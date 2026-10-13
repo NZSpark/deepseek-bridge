@@ -48,6 +48,8 @@ SEED_FLAG = "--seed"
 HELP_TOPICS = ("session",)
 #: ``/bridge session`` 的子命令。
 SESSION_SUBCOMMANDS = ("status", "reset", "reseed", "link", "unlink")
+#: 回复 token 少于这个数时，测速误差大，``/bridge token`` 会加一句提示。
+SHORT_REPLY_TOKENS = 50
 
 #: 会话路径：``https://chat.deepseek.com/a/chat/s/<会话 ID>``。
 _SESSION_PATH_RE = re.compile(r"^/a/chat/s/([0-9a-fA-F-]{8,})$")
@@ -56,6 +58,7 @@ _USAGE = (
     f"{BRIDGE_COMMAND} 用法：\n"
     f"  {BRIDGE_COMMAND} help [{'|'.join(HELP_TOPICS)}]        查看命令列表 / 分主题帮助\n"
     f"  {BRIDGE_COMMAND} status                       桥接与当前会话桶状态摘要\n"
+    f"  {BRIDGE_COMMAND} token                        最近一轮与本桶平均的 token 速度\n"
     f"  {BRIDGE_COMMAND} models                       本桥对外公布的模型名（同 /v1/models）\n"
     f"  {BRIDGE_COMMAND} session [status]             当前桶的会话状态摘要\n"
     f"  {BRIDGE_COMMAND} session reset                下一轮开新网页会话并播种完整历史\n"
@@ -96,6 +99,8 @@ REGISTRY: tuple = (
                 "桥接、浏览器与当前会话桶的状态摘要", "", True),
     CommandSpec(f"{BRIDGE_COMMAND} models",
                 "本桥对外公布的模型名（与 GET /v1/models 同源）", "", True),
+    CommandSpec(f"{BRIDGE_COMMAND} token",
+                "最近一轮与本桶平均的 token 速度（prefill/decode）", "", True),
     CommandSpec(f"{BRIDGE_COMMAND} session [status]",
                 "当前桶的会话状态摘要", "session", True),
     CommandSpec(f"{BRIDGE_COMMAND} session reset",
@@ -152,6 +157,10 @@ def parse_command(text: str) -> BridgeCommand | None:
         if rest:
             return _invalid(f"{BRIDGE_COMMAND} models 不接受参数。")
         return BridgeCommand("models")
+    if head == "token":
+        if rest:
+            return _invalid(f"{BRIDGE_COMMAND} token 不接受参数。")
+        return BridgeCommand("token")
     if head == "session":
         return _parse_session(rest)
     return _invalid(f"未知子命令：{tail[0]}。")
@@ -281,6 +290,8 @@ async def _execute(command: BridgeCommand, driver, bucket: str) -> str:
         return _status_reply(driver, bucket)
     if command.action == "models":
         return _models_reply()
+    if command.action == "token":
+        return _token_reply(driver, bucket)
     if command.action == "invalid":
         return f"[Bridge] 命令未执行：{command.reason}"
     if command.action == "session":
@@ -338,6 +349,88 @@ def _models_reply() -> str:
         "网页端实际选用的模型（那由登录账号与网页端设置决定）。"
     )
     return "\n".join(lines)
+
+
+def _token_reply(driver, bucket: str) -> str:
+    """本桶的 token 速度摘要：最近一轮 + 桶平均。只读，不导航、不触发生成。
+
+    口径诚实优先：只输出**计数与时长**，不回显提示词 / 回复正文；并显式标注
+    「token 数为估算」「速度为网页版有效速度，非模型裸速度」。
+    """
+    stats = driver.speed_stats(bucket)
+    samples = int(stats.get("samples") or 0)
+    if not samples:
+        return "\n".join([
+            f"[Bridge] token 速度（桶 {bucket}）：暂无样本。",
+            "  先发一轮普通请求（成功生成一次）后再查看。",
+            "  只统计成功的生成；取消 / 失败轮不计入。",
+        ])
+
+    lines = [f"[Bridge] token 速度（桶 {bucket}；本轮 = 最近一次成功生成）："]
+    last = stats.get("last") or {}
+    if last:
+        lines.extend(_token_block("本轮", last, indent="  "))
+    lines.append(f"  本桶平均（近 {samples} 轮）：")
+    lines.append(
+        f"    prefill {_num(stats.get('prefill_tps_avg'))} tok/s；"
+        f"decode {_num(stats.get('decode_tps_avg'))} tok/s；"
+        f"TTFT {_sec(stats.get('ttft_s_avg'))}s"
+    )
+    lines.append(
+        "  口径：token 数为字符数/3 的估算；速度为「网页版真实链路下的有效速度」，"
+        "非模型裸速度；仅统计成功的生成。"
+    )
+    reply_tokens = int(last.get("reply_tokens") or 0)
+    if reply_tokens and reply_tokens < SHORT_REPLY_TOKENS:
+        lines.append("  注意：最近一轮回复过短，速度估计误差较大，仅供参考。")
+    return "\n".join(lines)
+
+
+def _token_block(label: str, speed: dict, indent: str = "  ") -> list[str]:
+    """把一轮的数值指标格式化成若干行；只读字段，缺项按 0 处理。"""
+    inner = indent + "  "
+    lines = [f"{indent}{label}："]
+    lines.append(
+        f"{inner}prefill {_num(speed.get('prefill_tps'))} tok/s"
+        f"（输入 {_count(speed.get('prompt_tokens'))} tok / 首字 {_sec(speed.get('ttft_s'))}s）"
+    )
+    lines.append(
+        f"{inner}decode {_num(speed.get('decode_tps'))} tok/s"
+        f"（输出 {_count(speed.get('reply_tokens'))} tok / 解码 {_sec(speed.get('decode_s'))}s）"
+    )
+    lines.append(
+        f"{inner}TTFT {_sec(speed.get('ttft_s'))}s（修正后 {_sec(speed.get('ttft_adj_s'))}s）；"
+        f"decode {_sec(speed.get('decode_s'))}s（修正后 {_sec(speed.get('decode_adj_s'))}s，"
+        f"已扣落定 {_sec(speed.get('settle_credit_s'))}s）"
+    )
+    overhead = speed.get("bridge_overhead_ratio")
+    if overhead is not None:
+        lines.append(f"{inner}桥接开销占比 ≈ {round(float(overhead) * 100)}%")
+    return lines
+
+
+def _num(value) -> str:
+    """速度：四舍五入到整数，带千位分隔符；缺项 / 非法值回落到 0。"""
+    try:
+        return f"{round(float(value)):,}"
+    except (TypeError, ValueError):
+        return "0"
+
+
+def _count(value) -> str:
+    """token 计数：整数，带千位分隔符；缺项 / 非法值回落到 0。"""
+    try:
+        return f"{round(float(value)):,}"
+    except (TypeError, ValueError):
+        return "0"
+
+
+def _sec(value) -> str:
+    """时长：保留 1 位小数；缺项 / 非法值回落到 0.0。"""
+    try:
+        return f"{float(value):.1f}"
+    except (TypeError, ValueError):
+        return "0.0"
 
 
 def _browser_line(driver) -> str:

@@ -13,6 +13,7 @@ from typing import Any
 
 from . import config
 from .errors import DEFAULT_SESSION_KEY, HOME_URL
+from .token_speed import SpeedAggregate
 
 
 @dataclass
@@ -37,6 +38,15 @@ class SessionState:
     pending_reseed: bool = False
     last_error: str | None = None
     updated_at: int = 0
+    # ---- token 速度统计（仅数值和，不含正文；见 deepseek_web/token_speed.py）----
+    # ``speed_samples`` / ``speed_*_sum`` 是 /bridge token 的桶平均值来源；
+    # ``last_speed`` 保存最近一轮的完整指标（同样是纯数值）。
+    speed_samples: int = 0
+    speed_prefill_tps_sum: float = 0.0
+    speed_decode_tps_sum: float = 0.0
+    speed_ttft_s_sum: float = 0.0
+    speed_decode_s_sum: float = 0.0
+    last_speed: dict[str, Any] | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return asdict(self)
@@ -55,13 +65,25 @@ class SessionState:
         for name in ("has_history", "cap_hit", "pending_rotation", "pending_reseed"):
             if name in payload:
                 setattr(state, name, bool(payload.get(name)))
-        for name in ("turns", "est_tokens", "updated_at"):
+        for name in ("turns", "est_tokens", "updated_at", "speed_samples"):
             try:
                 setattr(state, name, int(payload.get(name) or 0))
             except (TypeError, ValueError):
                 setattr(state, name, 0)
+        for name in (
+            "speed_prefill_tps_sum",
+            "speed_decode_tps_sum",
+            "speed_ttft_s_sum",
+            "speed_decode_s_sum",
+        ):
+            try:
+                setattr(state, name, float(payload.get(name) or 0.0))
+            except (TypeError, ValueError):
+                setattr(state, name, 0.0)
         last_error = payload.get("last_error")
         state.last_error = last_error if isinstance(last_error, str) else None
+        last_speed = payload.get("last_speed")
+        state.last_speed = last_speed if isinstance(last_speed, dict) else None
         return state
 
 
@@ -250,6 +272,42 @@ class SessionStoreMixin:
         state = self._state(key)
         return state.pending_reseed or not state.has_history
 
+    def note_speed(self, speed: dict[str, Any], key: str | None = None) -> None:
+        """把一轮成功生成的测速指标累加进该桶，并落盘。
+
+        只累加**数值**（sum 与样本数）与最近一轮的数值快照，不含 prompt / reply 正文。
+        取消 / 失败轮不调用本方法，因此不会计入。
+        """
+        bucket = key or DEFAULT_SESSION_KEY
+        state = self._state(bucket)
+        state.speed_samples += 1
+        state.speed_prefill_tps_sum += float(speed.get("prefill_tps") or 0.0)
+        state.speed_decode_tps_sum += float(speed.get("decode_tps") or 0.0)
+        state.speed_ttft_s_sum += float(speed.get("ttft_s") or 0.0)
+        state.speed_decode_s_sum += float(speed.get("decode_s") or 0.0)
+        state.last_speed = dict(speed)
+        self._save_session_state(key=bucket)
+
+    def speed_stats(self, key: str | None = None) -> dict[str, Any]:
+        """该桶的测速汇总：本轮（最近一次）与桶平均。只读，不导航页面。"""
+        state = self._state(key)
+        # 复用纯函数的平均口径，避免 store 与 token_speed 各写一份除式而悄悄漂移。
+        agg = SpeedAggregate(
+            samples=state.speed_samples,
+            prefill_tps_sum=state.speed_prefill_tps_sum,
+            decode_tps_sum=state.speed_decode_tps_sum,
+            ttft_s_sum=state.speed_ttft_s_sum,
+            decode_s_sum=state.speed_decode_s_sum,
+        )
+        return {
+            "samples": agg.samples,
+            "last": state.last_speed,
+            "prefill_tps_avg": agg.prefill_tps_avg,
+            "decode_tps_avg": agg.decode_tps_avg,
+            "ttft_s_avg": agg.ttft_s_avg,
+            "decode_s_avg": agg.decode_s_avg,
+        }
+
     def session_stats(self, key: str | None = None) -> dict[str, Any]:
         """供 /healthz 与 ``/bridge`` 命令观察会话增长情况。"""
         state = self._state(key)
@@ -264,6 +322,7 @@ class SessionStoreMixin:
             "pending_reseed": state.pending_reseed,
             "linked_url": state.linked_url,
             "last_error": state.last_error,
+            "speed": self.speed_stats(key),
             "buckets": self.session_keys(),
         }
 

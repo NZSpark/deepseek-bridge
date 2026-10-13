@@ -48,6 +48,43 @@ class SpeedTiming:
     streamed: bool = False
 
 
+@dataclass(slots=True)
+class SpeedAggregate:
+    """单个会话桶的滚动平均。只存数值和，不存每次明细、不存正文。"""
+
+    samples: int = 0
+    prefill_tps_sum: float = 0.0
+    decode_tps_sum: float = 0.0
+    ttft_s_sum: float = 0.0
+    decode_s_sum: float = 0.0
+
+    def updated(self, speed: TokenSpeed) -> SpeedAggregate:
+        """返回累加一轮样本后的新聚合（不改自身，便于纯函数式测试）。"""
+        return SpeedAggregate(
+            samples=self.samples + 1,
+            prefill_tps_sum=self.prefill_tps_sum + speed.prefill_tps,
+            decode_tps_sum=self.decode_tps_sum + speed.decode_tps,
+            ttft_s_sum=self.ttft_s_sum + speed.ttft_s,
+            decode_s_sum=self.decode_s_sum + speed.decode_s,
+        )
+
+    @property
+    def prefill_tps_avg(self) -> float:
+        return self.prefill_tps_sum / self.samples if self.samples else 0.0
+
+    @property
+    def decode_tps_avg(self) -> float:
+        return self.decode_tps_sum / self.samples if self.samples else 0.0
+
+    @property
+    def ttft_s_avg(self) -> float:
+        return self.ttft_s_sum / self.samples if self.samples else 0.0
+
+    @property
+    def decode_s_avg(self) -> float:
+        return self.decode_s_sum / self.samples if self.samples else 0.0
+
+
 def compute_speed(prompt: str, reply: str, timing: SpeedTiming) -> TokenSpeed:
     """按单调时钟时间戳计算速度；纯函数便于测试，不读取系统状态。
 

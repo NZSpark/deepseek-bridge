@@ -30,15 +30,28 @@ SESSION_ID = "483878e7-7179-4e63-a19b-365ad11a686e"
 class FakeDriver:
     """记录命令都调用了什么，以及按桶返回的状态。"""
 
-    def __init__(self, page=True, init_error=None, linked=None, needs_seed=False, stats=None):
+    def __init__(self, page=True, init_error=None, linked=None, needs_seed=False, stats=None,
+                 *, speed=None):
         self.page = object() if page else None
         self.init_error = init_error
         self.linked = linked
         self.needs_seed_flag = needs_seed
         self.stats = dict(stats or {})
+        self.speed = dict(speed) if speed is not None else self._default_speed()
         self.calls = []
         self.chats = []
         self.saved = []
+
+    @staticmethod
+    def _default_speed():
+        return {
+            "samples": 0,
+            "last": None,
+            "prefill_tps_avg": 0.0,
+            "decode_tps_avg": 0.0,
+            "ttft_s_avg": 0.0,
+            "decode_s_avg": 0.0,
+        }
 
     # ---- 命令用到的那部分 ----
     def session_stats(self, key=None):
@@ -54,9 +67,14 @@ class FakeDriver:
             "pending_rotation": False,
             "pending_reseed": False,
             "last_error": None,
+            "speed": self.speed,
         }
         payload.update(self.stats)
         return payload
+
+    def speed_stats(self, key=None):
+        self.calls.append(("speed_stats", key))
+        return self.speed
 
     def linked_session_url(self, key=None):
         self.calls.append(("linked_session_url", key))
@@ -277,6 +295,60 @@ class StatusTests(unittest.TestCase):
         # 与 GET /v1/models 同源（同一函数）
         route_ids = [card.id for card in asyncio.run(server.list_models()).data]
         self.assertEqual(route_ids, expected)
+
+
+class TokenCommandTests(unittest.TestCase):
+    def test_no_samples_reports_placeholder(self):
+        reply, driver = call_handle("/bridge token")
+        self.assertIn("暂无样本", reply)
+        self.assertIn(("speed_stats", "default"), driver.calls)
+
+    def test_reports_last_turn_and_bucket_average(self):
+        speed = {
+            "samples": 12,
+            "last": {
+                "prompt_tokens": 3700,
+                "reply_tokens": 420,
+                "ttft_s": 3.0,
+                "ttft_adj_s": 2.8,
+                "decode_s": 8.1,
+                "decode_adj_s": 5.6,
+                "prefill_tps": 1234.0,
+                "decode_tps": 52.0,
+                "settle_credit_s": 2.5,
+                "bridge_overhead_ratio": 0.18,
+            },
+            "prefill_tps_avg": 1180.0,
+            "decode_tps_avg": 55.0,
+            "ttft_s_avg": 3.1,
+            "decode_s_avg": 8.0,
+        }
+        reply, _ = call_handle("/bridge token", FakeDriver(speed=speed), bucket="pi-task-1")
+        self.assertIn("桶 pi-task-1", reply)
+        self.assertIn("1,234 tok/s", reply)
+        self.assertIn("3,700 tok", reply)
+        self.assertIn("近 12 轮", reply)
+        self.assertIn("桥接开销占比", reply)
+        self.assertIn("估算", reply)  # 口径必须写明
+
+    def test_short_reply_gets_a_caveat(self):
+        speed = {
+            "samples": 1,
+            "last": {"reply_tokens": 12, "prefill_tps": 100.0, "decode_tps": 5.0,
+                     "ttft_s": 1.0, "ttft_adj_s": 0.8, "decode_s": 2.0,
+                     "decode_adj_s": 1.5, "settle_credit_s": 0.5,
+                     "prompt_tokens": 30, "bridge_overhead_ratio": 0.2},
+            "prefill_tps_avg": 100.0,
+            "decode_tps_avg": 5.0,
+            "ttft_s_avg": 1.0,
+            "decode_s_avg": 2.0,
+        }
+        reply, _ = call_handle("/bridge token", FakeDriver(speed=speed))
+        self.assertIn("过短", reply)
+
+    def test_token_rejects_arguments(self):
+        command = bridge_commands.parse_command("/bridge token now")
+        self.assertEqual(command.action, "invalid")
 
 
 class SessionCommandTests(unittest.TestCase):

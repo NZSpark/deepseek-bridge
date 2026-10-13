@@ -4,7 +4,7 @@ import json
 import math
 import unittest
 
-from deepseek_web.token_speed import SpeedTiming, compute_speed
+from deepseek_web.token_speed import SpeedAggregate, SpeedTiming, compute_speed
 
 
 class ComputeSpeedTests(unittest.TestCase):
@@ -122,6 +122,40 @@ class ComputeSpeedTests(unittest.TestCase):
         self.assertNotIn(reply_text, serialized)
         self.assertIn('"prompt_chars"', serialized)
         self.assertIn('"reply_tokens"', serialized)
+
+
+class SpeedAggregateTests(unittest.TestCase):
+    def _speed(self, prefill, decode, ttft, decode_s):
+        return compute_speed(
+            prompt="abcd",
+            reply="abcdefgh",
+            timing=SpeedTiming(
+                submitted_at=0.0,
+                first_text_at=ttft,
+                finished_at=ttft + decode_s,
+                poll_interval_s=0.0,
+            ),
+        )
+
+    def test_empty_aggregate_averages_are_zero(self):
+        agg = SpeedAggregate()
+        self.assertEqual(agg.samples, 0)
+        self.assertEqual(agg.prefill_tps_avg, 0.0)
+        self.assertEqual(agg.decode_tps_avg, 0.0)
+        self.assertEqual(agg.ttft_s_avg, 0.0)
+
+    def test_accumulates_sums_and_averages(self):
+        agg = SpeedAggregate()
+        agg = agg.updated(self._speed(0, 0, 2.0, 4.0))
+        agg = agg.updated(self._speed(0, 0, 4.0, 6.0))
+        self.assertEqual(agg.samples, 2)
+        self.assertAlmostEqual(agg.ttft_s_avg, 3.0)
+        self.assertAlmostEqual(agg.decode_s_avg, 5.0)
+
+    def test_updated_does_not_mutate_receiver(self):
+        agg = SpeedAggregate()
+        _ = agg.updated(self._speed(0, 0, 2.0, 4.0))
+        self.assertEqual(agg.samples, 0)  # 纯函数式：原对象不变
 
 
 if __name__ == "__main__":
