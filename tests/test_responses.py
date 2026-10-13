@@ -214,8 +214,8 @@ class StreamTests(unittest.TestCase):
             if chunk.startswith(":"):
                 continue
             lines = chunk.strip().splitlines()
-            ev = next(l[7:] for l in lines if l.startswith("event: "))
-            data = json.loads(next(l[6:] for l in lines if l.startswith("data: ")))
+            ev = next(line[7:] for line in lines if line.startswith("event: "))
+            data = json.loads(next(line[6:] for line in lines if line.startswith("data: ")))
             parsed.append((ev, data))
         return parsed
 

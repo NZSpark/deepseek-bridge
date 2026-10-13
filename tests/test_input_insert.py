@@ -26,7 +26,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import deepseek_api_server as srv  # noqa: E402
 from deepseek_web import config  # noqa: E402
-from deepseek_web.chat_io import ChunkedInsertUnavailable  # noqa: E402
 
 
 class FillTimeout(Exception):

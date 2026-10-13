@@ -14,7 +14,7 @@ import traceback
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from . import bridge_commands, config
 from .driver import (

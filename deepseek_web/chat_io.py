@@ -1122,7 +1122,10 @@ class ChatIOMixin:
                 继续轮询（把后续内容拼进同一条回复）。返回 False 表示可以结束。
                 超过 ``CONTINUE_BUTTON_MAX`` 次后不再点击，避免无限续接。
                 """
-                nonlocal continue_used, stable_count, last_normalized, last_len, saw_generating
+                # `no_progress_polls` 也必须在这里：它是本轮看门狗，分段之后必须从 0 起算。
+                # 少写它不会报错，只会变成「赋值给局部变量」的静默空操作（ruff F841 会抓到）。
+                nonlocal continue_used, stable_count, last_normalized, last_len, \
+                    saw_generating, no_progress_polls
                 if continue_used >= max(0, config.CONTINUE_BUTTON_MAX):
                     return False
                 label = await self._click_continue_if_present(bucket)
