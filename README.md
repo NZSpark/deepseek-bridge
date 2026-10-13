@@ -10,12 +10,11 @@
 
 - **OpenAI 兼容接口**：完整实现 `/v1/models`、`/v1/chat/completions`，并额外提供 `/v1/responses`（OpenAI Responses API，供 **Codex CLI** 使用）；支持 `messages`、`tools`、`stream` 等标准字段；错误也以 OpenAI 兼容的 `error` 结构返回。
 - **可运维**：`GET /healthz` 健康检查、`HEADLESS` 无头模式、`/debug/dom` DOM 诊断端点（需 `DEEPSEEK_DEBUG=1`，且不回显正文）。
-- **Bridge 聊天命令**：直接在对话里发 `/bridge status` / `/bridge help` / `/bridge session reset` 等命令，由桥**本地应答**（不发给网页版）——页面失效、浏览器未初始化时依然可用，可查状态、开关代码落盘、重开 / 重新播种网页会话、把当前桶绑定到指定网页会话。见 [doc/bridge_commands.md](doc/bridge_commands.md)。
+- **Bridge 聊天命令**：直接在对话里发 `/bridge status` / `/bridge help` / `/bridge session reset` 等命令，由桥**本地应答**（不发给网页版）——页面失效、浏览器未初始化时依然可用，可查状态、重开 / 重新播种网页会话、把当前桶绑定到指定网页会话。见 [doc/bridge_commands.md](doc/bridge_commands.md)。
 - **会话生命周期**：自动识别网页版「对话长度上限」（不再伪装成超时），超预算时自动轮转到新会话，并**播种**已有上下文。
 - **按任务隔离会话**：显式 `X-DeepSeek-Session` / `user` 字段优先；缺失时按提示词里的**工作目录**自动分桶（两个 Pi 在两个目录里跑各自一条会话，无需配置），再按 `User-Agent` 隔离不同客户端；每个任务独立页面与状态。
 - **流式响应（SSE）**：以 `text/event-stream` 逐字吐出内容，兼容 OpenAI 流式解析器。
 - **模拟 Function Calling**：网页版本身不支持 function calling，本项目通过「提示词注入 + 结构化解析」模拟出 OpenAI 的 `tool_calls` 语义。
-- **代码块自动落盘**：直接从网页 DOM 的 `<pre><code>` 提取代码，自动按语言保存为 `.py` / `.js` / `.json` 等文件到 `output/`。
 - **登录态持久化**：基于 `launch_persistent_context`，登录一次即可长期复用（`user_data/` 目录）。
 - **宽松字段校验**：对客户端发来的未知字段（`temperature`、`reasoning_effort`、内容分片数组等）全量兼容，绝不返回 422。
 - **长 prompt 防卡死**：写入输入框采用「整段 fill 优先 + 分块插入兜底」（长文本逐块写入、可断点续写），提交后验证消息真的发出去了；编辑器重挂载 / 延迟清空时改为读取当前输入框，并用「消息是否已出现在对话区」避免误报。超过 `PROMPT_MAX_CHARS`（默认 48000 < 50K）的 prompt 会在发送前截断并告警。
@@ -63,7 +62,6 @@
 ├── tests/                   # 解析层、结束判定、会话生命周期、路由层的回归测试（stdlib unittest）
 ├── doc/update.md            # 项目改进建议与进度
 ├── doc/bridge_commands.md   # /bridge 聊天命令的设计、语义与权限取舍
-├── output/                  # 自动提取的代码 / 回复文件输出目录
 ├── user_data/               # Chromium 持久化用户目录（保存登录态，勿提交到 git）
 └── .venv/                   # Python 虚拟环境
 ```
@@ -144,8 +142,6 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | `stream` | bool | 是否流式返回，默认 `false` |
 | `tools` | array | OpenAI tools 描述，用于触发模拟 function calling |
 | `tool_choice` | any | 设为 `"none"` 可禁用工具调用 |
-| `save_files` | bool | **本地扩展**，是否把提取到的代码落盘；不传 = 按当前桶偏好（`/bridge settings save-files`）或 `SAVE_FILES` 配置（默认 `true`） |
-| `output_dir` | string | **本地扩展**，输出目录，默认 `./output` |
 
 其余标准字段（`reasoning_effort`、未知字段等）均会被接收，不会返回 422。
 
@@ -177,8 +173,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
       "finish_reason": "stop"
     }
   ],
-  "usage": { "prompt_tokens": 12, "completion_tokens": 88, "total_tokens": 100 },
-  "saved_files": ["output/code_1790891215_1.py"]
+  "usage": { "prompt_tokens": 12, "completion_tokens": 88, "total_tokens": 100 }
 }
 ```
 
@@ -226,7 +221,7 @@ curl -X POST "http://127.0.0.1:8000/session/reset?session=pi-task-1"
 
 | 命令 | 作用 | 风险 |
 | --- | --- | --- |
-| `/bridge help [session\|settings]` | 列出命令 / 分主题帮助 | 只读 |
+| `/bridge help [session]` | 列出命令 / 分主题帮助 | 只读 |
 | `/bridge status` | 桥接、浏览器与当前会话桶状态摘要 | 只读 |
 | `/bridge models` | 本桥对外公布的模型名（与 `GET /v1/models` 同源） | 只读 |
 | `/bridge session [status]` | 当前桶的会话状态摘要（含绑定、是否要播种、轮数） | 只读 |
@@ -234,7 +229,6 @@ curl -X POST "http://127.0.0.1:8000/session/reset?session=pi-task-1"
 | `/bridge session reseed` | 下一轮把完整历史再播种一遍（一次性标记，落盘） | 改状态 |
 | `/bridge session link <URL> [--seed]` | 把当前桶绑定到指定网页会话 | 改状态 |
 | `/bridge session unlink` | 解除当前桶的会话绑定 | 改状态 |
-| `/bridge settings save-files [on\|off\|default\|status]` | 按桶保存的代码块落盘偏好 | 改状态 |
 
 ```bash
 # 看看桥还活着吗、请求会发到哪条会话（浏览器没起来也能答）
@@ -314,7 +308,6 @@ DeepSeek 网页版不支持原生 function calling，本项目采用三步模拟
 
     这样 3 个 Agent 会各自驱动一条网页会话、**真正并行**，互不阻塞；上下文与 usage 都按桶隔离。`BUCKET_LOCK_TIMEOUT_S>0` 时，若有请求落到**已被占用的同一个桶**（例如客户端重试堆叠），它会快速返回 503 `upstream_busy` 而不是无限排队、拖到客户端自己超时；设 `0` 则一直等待（旧行为）。用 `GET /healthz` 的 `cluster` 字段可看到 `parallel` / `max_buckets` / `busy`（正在处理的桶）/ `open_pages`。
 - **Responses API（Codex）**：`/v1/responses` 默认启用，可用 `ENABLE_RESPONSES_API=false` 关闭（返回 404，不影响 chat）。`RESPONSES_KEEPALIVE_S` 控制流式 keep-alive 间隔（秒，0=关闭）；`RESPONSES_TOOL_BUFFER` 控制工具模式是否先缓冲整段回复再解析 `tool_calls`（默认 `true`）。
-- **代码落盘**：当回复中包含代码块时，会从 DOM 提取并按语言保存；若无代码块则保存完整回复为 `.md`。
 - **不要提交 `user_data/`**：其中包含登录 Cookie / Session，属于敏感数据。
 - **不要绑定 `0.0.0.0`**：服务默认只监听 `127.0.0.1`，因为转发的是你的登录会话，暴露到网络等于把账号交出去。
 
@@ -326,7 +319,7 @@ DeepSeek 网页版不支持原生 function calling，本项目采用三步模拟
 .venv/bin/python -m unittest discover -s tests -t . -v
 ```
 
-共 308 个用例，覆盖解析层、结束判定、会话生命周期（播种 / 到顶 / 轮转 / 重试阶梯 / 会话桶 / 页面回收 / 锁）、模块结构、路由层、**Responses API 兼容层**（请求映射 / 响应结构 / 命名 SSE 事件 / 工具调用 / 错误映射），以及 **Bridge 聊天命令**（精确匹配 / 参数与地址校验 / 浏览器未就绪时的只读命令 / 绑定与重新播种的一次性语义 / 落盘偏好优先级）。全部用假 page / 假 driver 驱动，不需要启动浏览器，也不需要额外依赖（只用标准库 unittest）。
+测试覆盖解析层、结束判定、会话生命周期（播种 / 到顶 / 轮转 / 重试阶梯 / 会话桶 / 页面回收 / 锁）、模块结构、路由层、**Responses API 兼容层**（请求映射 / 响应结构 / 命名 SSE 事件 / 工具调用 / 错误映射），以及 **Bridge 聊天命令**（精确匹配 / 参数与地址校验 / 浏览器未就绪时的只读命令 / 绑定与重新播种的一次性语义）。全部用假 page / 假 driver 驱动，不需要启动浏览器，也不需要额外依赖（只用标准库 unittest）。
 
 ---
 

@@ -2,7 +2,7 @@
 
 覆盖 doc/bridge_commands.md 的测试清单：精确匹配（多行 / 正文 / 代码块不执行）、
 参数校验、只影响当前桶、浏览器未就绪时只读命令仍可用、两条协议路径一致、
-改状态命令的回执与作用范围、命令不写任务快照、以及落盘偏好的优先级。
+改状态命令的回执与作用范围、命令不写任务快照。
 
 不依赖 httpx：直接 await 路由函数 / handle_command，用假 driver 替换单例。
 
@@ -36,7 +36,6 @@ class FakeDriver:
         self.linked = linked
         self.needs_seed_flag = needs_seed
         self.stats = dict(stats or {})
-        self.save_files_pref = None
         self.calls = []
         self.chats = []
         self.saved = []
@@ -54,7 +53,6 @@ class FakeDriver:
             "cap_hit": False,
             "pending_rotation": False,
             "pending_reseed": False,
-            "save_files": self.save_files_pref,
             "last_error": None,
         }
         payload.update(self.stats)
@@ -82,13 +80,6 @@ class FakeDriver:
         self.linked = None
         return had
 
-    def save_files_preference(self, key=None):
-        return self.save_files_pref
-
-    def set_save_files_preference(self, value, key=None):
-        self.calls.append(("set_save_files_preference", value, key))
-        self.save_files_pref = value
-
     # ---- 普通请求用到的那部分（路由测试）----
     def needs_seed(self, key=None):
         return self.needs_seed_flag
@@ -108,10 +99,6 @@ class FakeDriver:
     async def send_chat(self, prompt, on_delta=None, seeded_prompt=None, key=None):
         self.chats.append({"prompt": prompt, "key": key})
         return "来自网页版的回复", []
-
-    def save_extracted_files(self, raw_text, code_blocks, output_dir):
-        self.saved.append((raw_text, code_blocks, output_dir))
-        return ["/tmp/fake.md"]
 
 
 def call_handle(text, driver=None, bucket=None):
@@ -165,16 +152,6 @@ class ParseTests(unittest.TestCase):
         self.assertIn("还需要一个会话地址", self.parse("/bridge session link").reason)
         self.assertIn("不认识选项", self.parse(f"/bridge session link {SESSION_URL} --x").reason)
         self.assertIn("不能有空格", self.parse("/bridge session link a b").reason)
-
-    def test_settings(self):
-        self.assertEqual(self.parse("/bridge settings save-files").subaction, "status")
-        self.assertEqual(self.parse("/bridge settings save-files on").value, True)
-        self.assertEqual(self.parse("/bridge settings save-files off").value, False)
-        self.assertIsNone(self.parse("/bridge settings save-files default").value)
-        self.assertIn("没有这个设置项", self.parse("/bridge settings think on").reason)
-        self.assertIn("还需要一个设置名", self.parse("/bridge settings").reason)
-        self.assertIn("最多接受一个取值", self.parse("/bridge settings save-files on off").reason)
-        self.assertIn("不支持取值", self.parse("/bridge settings save-files maybe").reason)
 
     def test_invalid_commands_carry_usage(self):
         command = self.parse("/bridge nope")
@@ -245,10 +222,7 @@ class HelpTests(unittest.TestCase):
     def test_topic_help_filters_groups(self):
         reply, _ = call_handle("/bridge help session")
         self.assertIn("/bridge session reset", reply)
-        self.assertNotIn("settings save-files", reply)
-        settings_reply, _ = call_handle("/bridge help settings")
-        self.assertIn("settings save-files", settings_reply)
-        self.assertNotIn("session reset", settings_reply)
+        self.assertIn("没有这个帮助主题", bridge_commands.parse_command("/bridge help settings").reason)
 
     def test_every_registry_entry_is_executable(self):
         # 帮助与实现不能漂移：注册表里的每条命令（去掉 [可选] 段后的最小形式）都要真的能执行
@@ -347,25 +321,6 @@ class SessionCommandTests(unittest.TestCase):
         self.assertIn(("unlink_session", "default"), driver.calls)
         empty, _ = call_handle("/bridge session unlink", FakeDriver())
         self.assertIn("本来就没有绑定", empty)
-
-
-class SettingsTests(unittest.TestCase):
-    def test_status_reports_preference_and_effective_value(self):
-        reply, _ = call_handle("/bridge settings save-files status")
-        self.assertIn("跟随全局配置", reply)
-        self.assertIn("SAVE_FILES", reply)
-        self.assertIn(config.OUTPUT_DIR, reply)
-        self.assertIn("不会覆盖已有文件", reply)
-
-    def test_set_records_per_bucket_preference(self):
-        driver = FakeDriver()
-        reply, _ = call_handle("/bridge settings save-files off", driver, bucket="pi-task-5")
-        self.assertIn(("set_save_files_preference", False, "pi-task-5"), driver.calls)
-        self.assertIn("已记录设置", reply)
-
-        default_reply, driver2 = call_handle("/bridge settings save-files default", FakeDriver())
-        self.assertIn(("set_save_files_preference", None, "default"), driver2.calls)
-        self.assertIn("跟随全局配置", default_reply)
 
 
 class HandleCommandTests(unittest.TestCase):
@@ -487,31 +442,6 @@ class ChatCommandRouteTests(RouteTestCase):
         usage = json.loads(usage_lines[0][len("data: "):])["usage"]
         self.assertEqual(usage["prompt_tokens"], 0)
         self.assertGreater(usage["completion_tokens"], 0)
-
-
-class SaveFilesPreferenceTests(RouteTestCase):
-    def test_bucket_preference_off_disables_saving(self):
-        self.fake.save_files_pref = False
-        self.call(self.chat_request("你好"))
-        self.assertEqual(self.fake.saved, [])
-
-    def test_bucket_preference_on_still_saves(self):
-        self.fake.save_files_pref = True
-        self.call(self.chat_request("你好"))
-        self.assertEqual(len(self.fake.saved), 1)
-
-    def test_request_field_beats_the_bucket_preference(self):
-        self.fake.save_files_pref = True
-        self.call(self.chat_request("你好", save_files=False))
-        self.assertEqual(self.fake.saved, [])
-        self.fake.save_files_pref = False
-        self.call(self.chat_request("你好", save_files=True))
-        self.assertEqual(len(self.fake.saved), 1)
-
-    def test_config_default_applies_when_nothing_is_set(self):
-        with unittest.mock.patch.object(config, "SAVE_FILES", False):
-            self.call(self.chat_request("你好"))
-        self.assertEqual(self.fake.saved, [])
 
 
 class ResponsesCommandTests(unittest.TestCase):
@@ -673,15 +603,6 @@ class DriverBindingTests(SessionTestCase):
         # 上下文不丢：页面仍停在原会话上
         self.assertEqual(driver._saved_session_url(), SESSION_URL)
         self.assertFalse(driver.unlink_session())
-
-    def test_save_files_preference_round_trip(self):
-        driver = self.driver_for(FakePage())
-        driver.set_save_files_preference(False, "pi-task-4")
-        fresh = srv.DeepSeekWebDriver()
-        self.assertFalse(fresh.save_files_preference("pi-task-4"))
-        self.assertIsNone(fresh.save_files_preference("pi-task-5"))
-        fresh.set_save_files_preference(None, "pi-task-4")
-        self.assertIsNone(fresh.save_files_preference("pi-task-4"))
 
 
 if __name__ == "__main__":

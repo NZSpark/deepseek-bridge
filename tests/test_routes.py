@@ -62,7 +62,6 @@ class FakeDriver:
         self.chats = []
         self.seed_queries = []
         self.resets = []
-        self.saved = []
 
     def _current_session_url(self):
         return "https://chat.deepseek.com/a/chat/s/483878e7-7179-4e63-a19b-365ad11a686e"
@@ -102,14 +101,6 @@ class FakeDriver:
 
     def session_stats(self, key=None):
         return {"url": None, "buckets": ["default", key or "default"], "asked": key}
-
-    def save_extracted_files(self, raw_text, code_blocks, output_dir):
-        self.saved.append((raw_text, code_blocks, output_dir))
-        return ["/tmp/fake.md"]
-
-    def save_files_preference(self, key=None):
-        # 未做设置时返回 None = 跟随 config.SAVE_FILES（旧行为：默认落盘）
-        return None
 
 
 class RouteTestCase(unittest.TestCase):

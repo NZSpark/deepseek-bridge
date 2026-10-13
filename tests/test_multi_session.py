@@ -461,42 +461,6 @@ class ResetTests(BucketTestCase):
         self.assertTrue(driver._state("never-used").pending_rotation)
 
 
-class SaveFilesTests(unittest.TestCase):
-    """落盘文件名去重（P2-E）：同一秒内的两个请求不能互相覆盖。"""
-
-    def test_same_second_requests_do_not_overwrite(self):
-        blocks = [{"lang": "python", "code": "print(1)"}]
-        with tempfile.TemporaryDirectory() as out:
-            first = srv.DeepSeekWebDriver.save_extracted_files("回复 A", blocks, out)
-            second = srv.DeepSeekWebDriver.save_extracted_files("回复 B", blocks, out)
-            self.assertNotEqual(first, second)
-            for path in first + second:
-                self.assertTrue(Path(path).exists())
-
-    def test_plain_text_replies_also_get_unique_names(self):
-        with tempfile.TemporaryDirectory() as out:
-            first = srv.DeepSeekWebDriver.save_extracted_files("A", [], out)
-            second = srv.DeepSeekWebDriver.save_extracted_files("B", [], out)
-        self.assertNotEqual(first, second)
-        self.assertTrue(first[0].endswith(".md"))
-
-    def test_server_style_call_through_the_instance(self):
-        """回归：server 是按 ``driver.save_extracted_files(raw, blocks, dir)`` 调的。
-
-        方法缺 ``self`` / 缺 ``@staticmethod`` 时，实例访问会把实例占掉一个位置参数，
-        于**每一次成功生成**都在这里抛
-        ``TypeError: takes 3 positional arguments but 4 were given``——
-        整轮回复白做，客户端只看到 500（且只在非流式分支触发，很容易漏测）。
-        """
-        driver = srv.DeepSeekWebDriver()
-        with tempfile.TemporaryDirectory() as out:
-            saved = driver.save_extracted_files(
-                "回复正文", [{"lang": "python", "code": "print(1)"}], out
-            )
-        self.assertEqual(len(saved), 1)
-        self.assertTrue(saved[0].endswith(".py"))
-
-
 class SessionKeyResolutionTests(BucketTestCase):
     """server._session_key：请求头 / user 字段 -> 会话桶。"""
 

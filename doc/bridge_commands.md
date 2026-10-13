@@ -10,7 +10,7 @@
 
 | 命令 | 作用 | 风险 |
 | --- | --- | --- |
-| `/bridge help [session\|settings]` | 列出命令 / 分主题帮助 | 只读 |
+| `/bridge help [session]` | 列出命令 / 分主题帮助 | 只读 |
 | `/bridge status` | 桥接、浏览器与当前会话桶状态摘要 | 只读 |
 | `/bridge models` | 本桥对外公布的模型名（与 `GET /v1/models` 同源） | 只读 |
 | `/bridge session [status]` | 当前桶的会话状态摘要 | 只读 |
@@ -18,7 +18,6 @@
 | `/bridge session reseed` | 下一轮把完整历史再播种一遍（一次性标记，落盘） | 改状态 |
 | `/bridge session link <URL> [--seed]` | 把当前桶绑定到指定网页会话 | 改状态 |
 | `/bridge session unlink` | 解除当前桶的会话绑定 | 改状态 |
-| `/bridge settings save-files [on\|off\|default\|status]` | 代码块落盘偏好（按桶持久化） | 改状态 |
 
 `link` 接受完整地址 `https://chat.deepseek.com/a/chat/s/<会话 ID>`，也接受**裸会话 ID**
 （会自动补全）。地址校验：`https` + 主机在 `LINK_ALLOWED_HOSTS` 里 + 路径形如
@@ -51,8 +50,6 @@
   该桶正在生成回复时绑定不会当场换页（避免打断在飞的请求），而是在下一轮发送前生效。
 * `session unlink` 只解除「钉在某条会话」的约束，**不动当前页面**：上下文不丢，
   当前页面仍停在原会话上。
-* `settings save-files` 是**按桶偏好**，优先级：请求体的 `save_files` 字段 >
-  当前桶偏好 > `SAVE_FILES` 配置。命令不会改进程的全局配置。
 
 ## 4. 权限与安全
 
@@ -70,7 +67,6 @@
 | --- | --- |
 | 没有 `/link`、`/unlink` 兼容别名 | 本项目原先没有这两个命令，统一走 `session link\|unlink` |
 | 没有 `settings think` | DeepSeek 网页版没有可可靠读写的思考模式开关，不做无法验证的「成功」 |
-| 多了 `settings save-files` | 本项目的落盘是请求级 `save_files` 字段，因此定义成「按桶偏好」而不是改全局配置 |
 | 没有 `/reset`、`/clear`、`/retry`、`/cancel`、跨桶列举、任意 shell / 写文件 | 与上游文档第 4 节一致：语义模糊或涉及任务取消 / 权限 / 会话隔离，不能只靠字符串分支保证正确 |
 
 ## 6. 测试
@@ -78,5 +74,4 @@
 `tests/test_bridge_commands.py` 覆盖：精确匹配（多行 / 正文 / 代码块 / 历史命令不重放）、
 参数与地址校验、帮助与注册表不漂移、只影响当前桶、浏览器未就绪时只读命令仍可用、
 两条协议路径（chat 流式与非流式、Responses）行为一致、命令不写任务快照、
-`reseed` 一次性标记的落盘与消费、`link` 的立即生效与桶忙时的延后对齐、
-落盘偏好的优先级。
+`reseed` 一次性标记的持久化与消费、`link` 的立即生效与桶忙时的延后对齐。

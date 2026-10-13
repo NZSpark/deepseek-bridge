@@ -46,9 +46,6 @@ class ResponsesRequest(BaseModel):
     stream: Optional[bool] = False
     temperature: Optional[float] = None
     top_p: Optional[float] = None
-    # 本地扩展（Codex 不传，保持与 chat 一致的默认）
-    save_files: Optional[bool] = True
-    output_dir: Optional[str] = None
 
 
 # ==================== 请求转换：Responses -> Chat ====================
@@ -158,8 +155,6 @@ def to_chat_request(req: ResponsesRequest) -> ChatCompletionRequest:
         tools=tools,
         tool_choice=req.tool_choice,
         max_tokens=req.max_output_tokens,
-        save_files=req.save_files,
-        output_dir=req.output_dir,
     )
 
 

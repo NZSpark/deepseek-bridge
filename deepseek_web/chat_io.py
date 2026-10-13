@@ -13,9 +13,6 @@
 
 import asyncio
 import re
-import time
-import uuid
-from pathlib import Path
 from typing import List, Optional
 
 from . import config
@@ -1327,51 +1324,3 @@ class ChatIOMixin:
             self._touch_page(bucket)
             await self._remember_session(bucket)
             return last_text, extracted_blocks
-
-    @staticmethod
-    def save_extracted_files(raw_text: str, code_blocks: List[dict], output_dir: str) -> List[str]:
-        """将提取的代码落地为对应格式的文件。
-
-        **必须是 staticmethod**：调用方（server 的非流式分支）按
-        ``driver.save_extracted_files(raw, blocks, dir)`` 三个位置参数调用。
-        缺少 ``self`` / 缺少 ``@staticmethod`` 时，实例访问会把 self 占掉一个位置，
-        导致每次成功生成后都在这里抛
-        ``TypeError: takes 3 positional arguments but 4 were given``——
-        整轮回复白做，客户端只看到 500。
-        """
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-        saved = []
-
-        ext_map = {
-            "python": "py", "py": "py", "javascript": "js", "js": "js",
-            "html": "html", "css": "css", "json": "json", "cpp": "cpp",
-            "c": "c", "bash": "sh", "shell": "sh", "sql": "sql", "markdown": "md"
-        }
-
-        # 同一秒内的多个请求会拿到同样的 timestamp，必须再加一段随机后缀，
-        # 否则 code_<ts>_1.py / response_<ts>.md 会互相覆盖（多任务并行后很常见）
-        unique = uuid.uuid4().hex[:6]
-
-        if code_blocks:
-            for idx, block in enumerate(code_blocks, start=1):
-                lang = block["lang"].lower().strip()
-                code = block["code"]
-                ext = ext_map.get(lang, "py" if "import " in code or "def " in code else "txt")
-
-                timestamp = int(time.time())
-                filename = f"code_{timestamp}_{idx}_{unique}.{ext}"
-                filepath = Path(output_dir) / filename
-
-                with open(filepath, "w", encoding="utf-8") as f:
-                    f.write(code)
-                saved.append(str(filepath))
-                print(f"[已保存文件] {filepath}")
-        else:
-            filename = f"response_{int(time.time())}_{unique}.md"
-            filepath = Path(output_dir) / filename
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write(raw_text)
-            saved.append(str(filepath))
-
-        return saved
-

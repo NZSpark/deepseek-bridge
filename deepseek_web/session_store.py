@@ -24,8 +24,6 @@ class SessionState:
       都优先落到它上面）；
     * ``pending_reseed``：``/bridge session reseed`` 排队的一次性标记——下一轮把完整
       历史再播种一遍（落盘，重启 / 并发都不会丢，发送成功后清除）；
-    * ``save_files``：代码块落盘偏好（``/bridge settings save-files``，None = 跟随
-      ``config.SAVE_FILES``）。
     """
 
     url: Optional[str] = None
@@ -36,7 +34,6 @@ class SessionState:
     cap_hit: bool = False
     pending_rotation: bool = False
     pending_reseed: bool = False
-    save_files: Optional[bool] = None
     last_error: Optional[str] = None
     updated_at: int = 0
 
@@ -54,9 +51,6 @@ class SessionState:
         linked = payload.get("linked_url")
         if isinstance(linked, str) and linked:
             state.linked_url = linked
-        save_files = payload.get("save_files")
-        if isinstance(save_files, bool):
-            state.save_files = save_files
         for name in ("has_history", "cap_hit", "pending_rotation", "pending_reseed"):
             if name in payload:
                 setattr(state, name, bool(payload.get(name)))
@@ -269,7 +263,6 @@ class SessionStoreMixin:
             "pending_rotation": state.pending_rotation,
             "pending_reseed": state.pending_reseed,
             "linked_url": state.linked_url,
-            "save_files": state.save_files,
             "last_error": state.last_error,
             "buckets": self.session_keys(),
         }
@@ -285,17 +278,6 @@ class SessionStoreMixin:
         self._state(bucket).pending_reseed = True
         self._save_session_state(key=bucket)
         print(f"[会话] 已排队 key={bucket} 的重新播种，下一轮将重发完整历史。")
-
-    def save_files_preference(self, key: Optional[str] = None) -> Optional[bool]:
-        """该桶的代码块落盘偏好（None = 跟随 config.SAVE_FILES）。"""
-        return self._state(key).save_files
-
-    def set_save_files_preference(self, value: Optional[bool], key: Optional[str] = None) -> None:
-        """写入该桶的落盘偏好（None = 回到跟随全局配置）。"""
-        bucket = key or DEFAULT_SESSION_KEY
-        state = self._state(bucket)
-        state.save_files = None if value is None else bool(value)
-        self._save_session_state(key=bucket)
 
     def _session_over_budget(self, key: Optional[str] = None) -> bool:
         """会话体积是否已达到轮转阈值（0 表示禁用该维度）。"""

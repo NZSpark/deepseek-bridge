@@ -54,18 +54,6 @@ async def lifespan(app: FastAPI):
     await driver.close()
 
 
-def _effective_save_files(request: ChatCompletionRequest, driver, bucket: str) -> bool:
-    """代码块是否落盘：请求体的 save_files > 当前桶偏好 > config.SAVE_FILES。
-
-    请求体没传该项时是 ``None``（没表态），再看桶偏好（``/bridge settings save-files``），
-    最后回退到全局配置。显式 true / false 永远优先。
-    """
-    if request.save_files is not None:
-        return bool(request.save_files)
-    preference = driver.save_files_preference(bucket)
-    return bool(config.SAVE_FILES if preference is None else preference)
-
-
 def _error_response(status_code: int, message: str, err_type: str):
     """以 OpenAI 兼容的 error 结构返回错误，而不是裸 500 字符串。"""
     return JSONResponse(
@@ -535,12 +523,6 @@ async def chat_completions(
             ),
         )
 
-    saved_files = []
-    if _effective_save_files(request, driver, bucket):
-        saved_files = driver.save_extracted_files(
-            reply_content, code_blocks, request.output_dir or config.OUTPUT_DIR
-        )
-
     return ChatCompletionResponse(
         model=request.model,
         choices=[Choice(
@@ -553,5 +535,4 @@ async def chat_completions(
             completion_tokens=estimate_tokens(reply_content),
             total_tokens=estimate_tokens(sent_prompt) + estimate_tokens(reply_content),
         ),
-        saved_files=saved_files,
     )

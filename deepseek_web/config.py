@@ -77,7 +77,6 @@ PORT = env_int("PORT", 8000)
 # 避免上下文丢失或停留在空白页。
 SESSION_FILE = Path(env_str("SESSION_FILE", "./user_data/.deepseek_session"))
 USER_DATA_DIR = env_str("USER_DATA_DIR", "./user_data")
-OUTPUT_DIR = env_str("OUTPUT_DIR", "./output")
 SESSION_URL_RE = re.compile(r"https://chat\.deepseek\.com/a/chat/s/[0-9a-fA-F-]+")
 
 
@@ -228,9 +227,6 @@ BUCKET_LOCK_TIMEOUT_S = env_float("BUCKET_LOCK_TIMEOUT_S", 0)
 READY_TIMEOUT_MS = env_int("READY_TIMEOUT_MS", 15000)
 # 播种（新会话时重放历史）的最大字符数预算；超出时保留最近的消息
 SEED_MAX_CHARS = env_int("SEED_MAX_CHARS", 12000)
-# 代码块落盘的全局默认（`/bridge settings save-files` 的「跟随全局配置」）。
-# 优先级：请求体的 save_files 字段 > 当前桶偏好 > 这里。请求体没传该项时才看后两者。
-SAVE_FILES = env_bool("SAVE_FILES", True)
 # 网页会话超过以下任一阈值后，下一轮自动轮转到新会话（0 表示禁用该维度）
 SESSION_MAX_TURNS = env_int("SESSION_MAX_TURNS", 60)
 SESSION_MAX_TOKENS = env_int("SESSION_MAX_TOKENS", 60000)

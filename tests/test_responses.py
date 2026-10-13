@@ -50,9 +50,6 @@ class FakeDriver:
     def sent_prompt(self, key=None):
         return self.last_prompt
 
-    def save_extracted_files(self, raw_text, code_blocks, output_dir):
-        return []
-
 
 def make_request(**extra):
     payload = {"model": "deepseek-chat", "input": "hi"}

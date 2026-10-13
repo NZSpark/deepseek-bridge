@@ -54,11 +54,6 @@ class ChatCompletionRequest(BaseModel):
     top_p: Optional[float] = None
     max_tokens: Optional[int] = None
     stop: Optional[Any] = None
-    # ---- 本地扩展字段（Pi 不会传，保持默认即可）----
-    # None = 客户端没表态：由当前桶偏好（`/bridge settings save-files`）或 config.SAVE_FILES 决定；
-    # 显式 true / false 永远优先于两者。
-    save_files: Optional[bool] = None
-    output_dir: Optional[str] = None  # None -> 使用 .env 的 OUTPUT_DIR
 
 
 class ChoiceMessage(BaseModel):
@@ -86,7 +81,6 @@ class ChatCompletionResponse(BaseModel):
     model: str = "deepseek-chat"
     choices: List[Choice]
     usage: Usage = Field(default_factory=Usage)
-    saved_files: List[str] = []
 
 
 class ModelCard(BaseModel):

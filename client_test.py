@@ -18,7 +18,3 @@ response1 = client.chat.completions.create(
 
 print("AI 回复内容：")
 print(response1.choices[0].message.content)
-
-# 打印本地拓展提取的文件路径
-if hasattr(response1, "saved_files"):
-    print("\n自动提取并保存的文件列表：", response1.saved_files)

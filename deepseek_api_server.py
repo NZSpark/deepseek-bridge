@@ -34,7 +34,6 @@ from deepseek_web.config import (  # noqa: F401
     LEN_STABLE_POLLS,
     MAX_SESSION_BUCKETS,
     MAX_UPSTREAM_RETRIES,
-    OUTPUT_DIR,
     POLL_INTERVAL_S,
     PORT,
     PROMPT_MAX_CHARS,

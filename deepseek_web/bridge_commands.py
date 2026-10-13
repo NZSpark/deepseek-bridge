@@ -22,8 +22,6 @@
 * 不提供 ``settings think``：DeepSeek 网页版没有可可靠读写的思考模式开关；
 * 不提供 ``/link`` / ``/unlink`` 兼容别名：本项目原先没有这两个命令，统一走
   ``session link`` / ``session unlink``；
-* 新增 ``settings save-files``：本项目的落盘是请求级 ``save_files`` 字段，因此这里
-  定义成「按桶偏好」，优先级为 请求字段 > 桶偏好 > ``config.SAVE_FILES``。
 
 两条协议路径（Chat Completions 与 Responses）都调用 :func:`handle_command`，
 避免行为分叉。
@@ -46,11 +44,7 @@ BRIDGE_COMMAND = "/bridge"
 #: 「按播种方式绑定」的开关。
 SEED_FLAG = "--seed"
 #: ``/bridge help`` 支持的主题。
-HELP_TOPICS = ("session", "settings")
-#: ``/bridge settings`` 支持的设置项名字。
-SETTING_NAMES = ("save-files",)
-#: ``/bridge settings <name>`` 的取值：on / off = 本桶偏好；default = 跟随全局配置。
-SETTING_VALUES = ("on", "off", "default", "status")
+HELP_TOPICS = ("session",)
 #: ``/bridge session`` 的子命令。
 SESSION_SUBCOMMANDS = ("status", "reset", "reseed", "link", "unlink")
 
@@ -67,8 +61,6 @@ _USAGE = (
     f"  {BRIDGE_COMMAND} session reseed               下一轮把完整历史再播种一遍（一次性）\n"
     f"  {BRIDGE_COMMAND} session link <URL> [{SEED_FLAG}]   把当前桶绑定到指定网页会话\n"
     f"  {BRIDGE_COMMAND} session unlink               解除当前桶的会话绑定\n"
-    f"  {BRIDGE_COMMAND} settings <{'|'.join(SETTING_NAMES)}> [{'|'.join(SETTING_VALUES)}]\n"
-    f"                                               按桶保存的设置（不带取值 = 查看当前值）"
 )
 
 
@@ -76,12 +68,10 @@ _USAGE = (
 class BridgeCommand:
     """一条已被识别的 ``/bridge`` 命令。"""
 
-    action: str  # "help" | "status" | "models" | "session" | "settings" | "invalid"
-    subaction: str = ""  # help 主题 / session 子命令 / settings 的查询或写入
+    action: str  # "help" | "status" | "models" | "session" | "invalid"
+    subaction: str = ""  # help 主题 / session 子命令
     target: str = ""  # session link 的会话地址（原样，执行时再校验归一化）
     seed: bool = False  # session link 是否带 --seed
-    name: str = ""  # settings 名字（save-files）
-    value: Optional[bool] = None  # settings 目标值（None = 跟随全局默认）
     reason: str = ""  # 命令未执行的原因（invalid 时展示给用户）
 
 
@@ -115,8 +105,6 @@ REGISTRY: tuple = (
                 "把当前桶绑定到指定网页会话（--seed 表示该会话里没有此前记录）", "session", False),
     CommandSpec(f"{BRIDGE_COMMAND} session unlink",
                 "解除当前桶的会话绑定", "session", False),
-    CommandSpec(f"{BRIDGE_COMMAND} settings save-files [{'|'.join(SETTING_VALUES)}]",
-                "代码块落盘偏好（按桶持久化；不带取值 = 查看）", "settings", False),
 )
 
 
@@ -165,8 +153,6 @@ def parse_command(text: str) -> Optional[BridgeCommand]:
         return BridgeCommand("models")
     if head == "session":
         return _parse_session(rest)
-    if head == "settings":
-        return _parse_settings(rest)
     return _invalid(f"未知子命令：{tail[0]}。")
 
 
@@ -200,29 +186,6 @@ def _parse_session(rest: List[str]) -> BridgeCommand:
     if len(positional) > 1:
         return _invalid(f"会话地址里不能有空格：收到了 {len(positional)} 段参数。")
     return BridgeCommand("session", subaction="link", target=positional[0], seed=seed)
-
-
-def _parse_settings(rest: List[str]) -> BridgeCommand:
-    if not rest:
-        listed = "、".join(SETTING_NAMES)
-        return _invalid(f"settings 还需要一个设置名（可用：{listed}）。")
-    name, args = rest[0].lower(), rest[1:]
-    if name not in SETTING_NAMES:
-        listed = "、".join(SETTING_NAMES)
-        return _invalid(f"没有这个设置项：{rest[0]}（可用：{listed}）。")
-    if not args or (len(args) == 1 and args[0].lower() == "status"):
-        return BridgeCommand("settings", subaction="status", name=name)
-    if len(args) > 1:
-        return _invalid(f"settings {name} 最多接受一个取值。")
-    value_token = args[0].lower()
-    if value_token not in SETTING_VALUES:
-        listed = "、".join(SETTING_VALUES)
-        return _invalid(f"settings {name} 不支持取值 {args[0]}（可用：{listed}）。")
-    if value_token == "status":
-        return BridgeCommand("settings", subaction="status", name=name)
-    # on / off = 本桶偏好；default = 跟随全局配置（值为 None）
-    value: Optional[bool] = {"on": True, "off": False, "default": None}[value_token]
-    return BridgeCommand("settings", subaction="set", name=name, value=value)
 
 
 def latest_user_text(messages: Optional[Sequence[Any]]) -> Optional[str]:
@@ -321,8 +284,6 @@ async def _execute(command: BridgeCommand, driver, bucket: str) -> str:
         return f"[Bridge] 命令未执行：{command.reason}"
     if command.action == "session":
         return await _session_reply(command, driver, bucket)
-    if command.action == "settings":
-        return _settings_reply(command, driver, bucket)
     return f"[Bridge] 命令未执行：未知命令。\n{_USAGE}"  # 防御：注册表与执行分支必须同步
 
 
@@ -535,66 +496,6 @@ def _session_unlink_reply(driver, bucket: str) -> str:
         "  当前页面与上下文保持不变（不会被清空）；只是不再被钉在那条会话上。",
         f"  需要一条全新的网页会话：`{BRIDGE_COMMAND} session reset`。",
     ])
-
-
-# ==================== 设置项（按桶持久化，不改进程全局配置）====================
-
-
-def _settings_reply(command: BridgeCommand, driver, bucket: str) -> str:
-    name = command.name
-    if command.subaction == "set":
-        driver.set_save_files_preference(command.value, bucket)
-        logger.info(
-            "[命令] key=%s 已把设置 %s 记为 %s。", bucket, name, _preference_label(command.value)
-        )
-        lines = [
-            f"[Bridge] 已记录设置「{name}」（会话桶 {bucket}）：{_preference_label(command.value)}"
-            "（按桶持久化，只有这个桶受影响）。"
-        ]
-        lines.extend(_save_files_detail_lines(driver, bucket))
-        lines.append(f"  查看：`{BRIDGE_COMMAND} settings {name} status`")
-        return "\n".join(lines)
-
-    lines = [f"[Bridge] 设置「{name}」（会话桶 {bucket}）："]
-    lines.extend(_save_files_status_lines(driver, bucket))
-    lines.append(f"  用法：`{BRIDGE_COMMAND} settings {name} [{'|'.join(SETTING_VALUES)}]`")
-    return "\n".join(lines)
-
-
-def _preference_label(value: Optional[bool]) -> str:
-    if value is None:
-        return "跟随全局配置"
-    return "开启" if value else "关闭"
-
-
-def _save_files_status_lines(driver, bucket: str) -> List[str]:
-    preference = driver.save_files_preference(bucket)
-    lines = [
-        f"  代码块落盘偏好：{_preference_label(preference)}"
-        + ("（SAVE_FILES）" if preference is None else "（按桶持久化）")
-    ]
-    lines.extend(_save_files_detail_lines(driver, bucket))
-    return lines
-
-
-def _save_files_detail_lines(driver, bucket: str) -> List[str]:
-    """落盘行为说明：写到哪、会不会覆盖、怎么关。"""
-    preference = driver.save_files_preference(bucket)
-    effective = bool(config.SAVE_FILES if preference is None else preference)
-    lines = [
-        f"  当前生效：{'开启' if effective else '关闭'}"
-        "（优先级：请求体的 save_files 字段 > 本桶偏好 > SAVE_FILES 配置）",
-    ]
-    if effective:
-        lines.append(f"  落盘目录：{config.OUTPUT_DIR}（请求可用 output_dir 覆盖）")
-        lines.append(
-            "  落盘行为：每次回复**新建**文件（code_<时间戳>_<序号>_<随机>.<扩展名>；"
-            "没有代码块时 response_<时间戳>_<随机>.md），不会覆盖已有文件。"
-        )
-    lines.append(
-        f"  关闭方式：`{BRIDGE_COMMAND} settings save-files off`（本桶）或请求里显式传 save_files=false。"
-    )
-    return lines
 
 
 def _one_line(text: str, limit: int = 200) -> str:
