@@ -7,9 +7,10 @@
 """
 
 import asyncio
+import contextlib
 import time
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from . import config
 from .errors import DEFAULT_SESSION_KEY, HOME_URL, DeepSeekBusyError
@@ -32,7 +33,7 @@ class PagePoolMixin:
         "browser has disconnected",
     )
 
-    def _page_for(self, key: Optional[str] = None):
+    def _page_for(self, key: str | None = None):
         """取出某个会话桶的页面；默认桶就是 ``self.page``。
 
         注意：返回的对象**可能已经失效**（标签被关掉 / 渲染进程崩溃）。
@@ -88,15 +89,15 @@ class PagePoolMixin:
             self._active_counts.pop(bucket, None)
             self._active_buckets.discard(bucket)
 
-    def sent_prompt(self, key: Optional[str] = None) -> Optional[str]:
+    def sent_prompt(self, key: str | None = None) -> str | None:
         """某个会话桶最近一次真正发给网页版的 prompt（可能因轮转由增量改选播种版）。"""
         return self._last_prompts.get(key or DEFAULT_SESSION_KEY)
 
-    def busy_keys(self) -> List[str]:
+    def busy_keys(self) -> list[str]:
         """当前正在处理请求（已拿到锁、正在生成）的会话桶，供多 Agent 场景观察占用。"""
         return sorted(self._active_buckets)
 
-    def cluster_stats(self) -> Dict[str, Any]:
+    def cluster_stats(self) -> dict[str, Any]:
         """多会话 / 多 Agent 运行概况（并发开关、桶上限、占用、已开页面数）。"""
         return {
             "parallel": config.PARALLEL_BUCKETS,
@@ -107,7 +108,7 @@ class PagePoolMixin:
             "keys": self.session_keys(),
         }
 
-    def _lock_for(self, key: Optional[str] = None) -> asyncio.Lock:
+    def _lock_for(self, key: str | None = None) -> asyncio.Lock:
         """取某个会话桶的锁。
 
         默认（``PARALLEL_BUCKETS=false``）所有桶共用 ``self.lock``，即**串行**：
@@ -123,7 +124,7 @@ class PagePoolMixin:
         return lock
 
     @asynccontextmanager
-    async def _session_lock(self, key: Optional[str] = None):
+    async def _session_lock(self, key: str | None = None):
         """获取某个会话桶的锁；超过 ``BUCKET_LOCK_TIMEOUT_S`` 则抛 ``DeepSeekBusyError``。
 
         ``BUCKET_LOCK_TIMEOUT_S=0``（默认）表示一直等，保持旧行为；
@@ -134,7 +135,7 @@ class PagePoolMixin:
         if timeout and timeout > 0:
             try:
                 await asyncio.wait_for(lock.acquire(), timeout=timeout)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 bucket = key or DEFAULT_SESSION_KEY
                 raise DeepSeekBusyError(
                     f"会话桶 {bucket} 正在处理另一个请求（等待超过 {timeout:g}s）。"
@@ -150,7 +151,7 @@ class PagePoolMixin:
             self._unmark_bucket_active(bucket)
             lock.release()
 
-    def _touch_page(self, key: Optional[str] = None) -> None:
+    def _touch_page(self, key: str | None = None) -> None:
         self._page_last_used[key or DEFAULT_SESSION_KEY] = time.monotonic()
 
     def _other_request_in_flight(self, bucket: str) -> bool:
@@ -196,7 +197,7 @@ class PagePoolMixin:
             print(f"[回收] 已关闭 key={bucket} 的页面（{reason}），会话状态保留。")
         return True
 
-    async def _recycle_idle_pages(self, exclude: Optional[str] = None) -> int:
+    async def _recycle_idle_pages(self, exclude: str | None = None) -> int:
         """关闭空闲超过 ``BUCKET_IDLE_TTL_S`` 的桶页面，返回关闭数量。"""
         ttl = config.BUCKET_IDLE_TTL_S
         if ttl <= 0:
@@ -211,7 +212,7 @@ class PagePoolMixin:
                 closed += 1 if await self._close_bucket_page(bucket, f"空闲超过 {int(ttl)}s") else 0
         return closed
 
-    async def _evict_lru_page(self, exclude: Optional[str] = None) -> bool:
+    async def _evict_lru_page(self, exclude: str | None = None) -> bool:
         """淘汰最久未用的桶页面（状态保留），腾出一个位置。
 
         正在生成回复的桶与 ``exclude`` 永不淘汰：淘汰它们会直接中断正在进行的一轮对话。
@@ -232,7 +233,8 @@ class PagePoolMixin:
                 config.READY_SELECTOR, timeout=config.READY_TIMEOUT_MS, state="visible"
             )
             return True
-        except Exception:
+        except Exception:  # noqa: BLE001 就绪探测必须兜底成「未就绪」：这里不 import
+            # playwright 的异常类，测试替身与不同 playwright 版本都要能命中（见本文件头注释）
             print("[会话] 页面已打开，但未检测到输入框，请检查登录状态。")
             return False
 
@@ -250,7 +252,7 @@ class PagePoolMixin:
 
     # ---- /bridge session link|unlink：把桶固定到用户指定的网页会话 ----
     async def link_session(
-        self, url: str, seed: bool = False, key: Optional[str] = None
+        self, url: str, seed: bool = False, key: str | None = None
     ) -> None:
         """把某个会话桶绑定到指定网页会话（``/bridge session link``）。
 
@@ -299,7 +301,7 @@ class PagePoolMixin:
             return
         await self._rebuild_page(bucket, "会话绑定已变更")
 
-    def unlink_session(self, key: Optional[str] = None) -> bool:
+    def unlink_session(self, key: str | None = None) -> bool:
         """解除某个会话桶的绑定，返回此前是否有绑定。
 
         只解除「固定到这条会话」的约束，**不动当前页面**：上下文还在，用户只是不再
@@ -374,13 +376,12 @@ class PagePoolMixin:
                 and self._current_session_url(DEFAULT_SESSION_KEY) is not None
             )
             if old is not None and old is not page:
-                try:
+                # 旧页面多半已经死了，关不掉也无所谓
+                with contextlib.suppress(Exception):
                     await old.close()
-                except Exception:  # noqa: BLE001 旧页面多半已经死了，关不掉也无所谓
-                    pass
             print(f"[会话] 默认会话页面已失效，已重建（{target}）。")
 
-    async def _rebuild_page(self, key: Optional[str], reason: str) -> None:
+    async def _rebuild_page(self, key: str | None, reason: str) -> None:
         """**强制**重建某个桶的页面（不信任 ``is_closed()`` 的判断）。
 
         用于「页面已经不可用」的恢复：崩溃的渲染进程往往仍报 ``is_closed() == False``，
@@ -395,7 +396,7 @@ class PagePoolMixin:
             await self._close_bucket_page(bucket, reason)
             await self._create_bucket_page(bucket)
 
-    async def _ensure_page(self, key: Optional[str]) -> None:
+    async def _ensure_page(self, key: str | None) -> None:
         """确保某个会话桶有一条**可驱动**的页面（惰性创建 + 失效重建）。
 
         桶数量达到 ``MAX_SESSION_BUCKETS`` 时**不再直接报错**：先回收空闲页面，

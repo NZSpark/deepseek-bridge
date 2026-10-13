@@ -7,9 +7,10 @@ DeepSeek 网页版并不原生支持 OpenAI 的 function calling，因此这里�
   3. 下一轮请求里 role=tool 的执行结果再拼回 prompt 喂给网页版。
 """
 
+import contextlib
 import json
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .models import FunctionCall, ToolCall
 
@@ -38,7 +39,9 @@ _TOOL_USES_RE = re.compile(r"tool_uses\s*\"?\s*:", re.IGNORECASE)
 _BAR = r"[｜|]{1,4}"
 _DSML_INVOKE_OPEN_RE = re.compile(rf"<\s*{_BAR}\s*DSML\s*{_BAR}\s*invoke\b([^>]*)>", re.IGNORECASE)
 _DSML_INVOKE_CLOSE_RE = re.compile(rf"<\s*/\s*{_BAR}\s*DSML\s*{_BAR}\s*invoke\s*>", re.IGNORECASE)
-_DSML_PARAM_OPEN_RE = re.compile(rf"<\s*{_BAR}\s*DSML\s*{_BAR}\s*parameter\b([^>]*)>", re.IGNORECASE)
+_DSML_PARAM_OPEN_RE = re.compile(
+    rf"<\s*{_BAR}\s*DSML\s*{_BAR}\s*parameter\b([^>]*)>", re.IGNORECASE
+)
 _DSML_PARAM_CLOSE_RE = re.compile(rf"<\s*/\s*{_BAR}\s*DSML\s*{_BAR}\s*parameter\s*>", re.IGNORECASE)
 # 参数值的 JSON 标量识别（string="true" 时不参与）
 _DSML_SCALAR_RE = re.compile(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null", re.IGNORECASE)
@@ -50,7 +53,7 @@ _DSML_GENERIC_NAMES = {
 _SHELL_NAME_KEYWORDS = ("shell", "exec", "bash", "command", "term")
 
 
-def format_tools_instruction(tools: List[Dict[str, Any]]) -> str:
+def format_tools_instruction(tools: list[dict[str, Any]]) -> str:
     """把 OpenAI tools 描述转换成注入网页版的自然语言指令。"""
     lines = [
         "[工具调用说明]",
@@ -74,8 +77,10 @@ def format_tools_instruction(tools: List[Dict[str, Any]]) -> str:
         "一次可输出多个 tool_call 代码块以并行调用多个工具；代码块之外不要输出多余解释。",
         "如果不需要调用任何工具，请直接给出最终回答，不要输出 tool_call 代码块。",
         "工具名必须逐字使用上面列出的名字，不要自造 bash / shell 之类的通用名。",
-        "除 ```tool_call 围栏外，严禁输出 <｜DSML｜ ...>、<invoke>/<parameter>、<tool_calls> "
-        "等 XML/DSL 标记——那些格式不会被执行，任务会直接失败。",
+        (
+            "除 ```tool_call 围栏外，严禁输出 <｜DSML｜ ...>、<invoke>/<parameter>、<tool_calls> "
+            "等 XML/DSL 标记——那些格式不会被执行，任务会直接失败。"
+        ),
     ]
     return "\n".join(lines)
 
@@ -86,18 +91,19 @@ def format_tool_call_emphasis() -> str:
     新 bucket 没有“示范过正确格式”的历史轮次，模型最容易在这时候
     退回原生 DSML 标记；把带围栏示例的完整格式再点一遍，双保险。
     """
-    return "\n".join([
-        "[输出格式强调] 这是一个新会话（或刚被重置），以下规则本会话持续有效：",
-        "需要调用工具时，只输出一个或多个如下格式的代码块（arguments 必须是合法 JSON）：",
-        "```tool_call",
-        '{"name": "工具名", "arguments": {参数对象}}',
-        "```",
-        "工具名必须逐字使用 [工具调用说明] 中列出的名字，不要自造 bash / shell 之类的通用名。",
-        "禁止输出 <｜DSML｜ ...>、<invoke>/<parameter>、<tool_calls> 等 XML/DSL 标记——它们不会被执行。",
-    ])
+    return (
+        "[输出格式强调] 这是一个新会话（或刚被重置），以下规则本会话持续有效：\n"
+        "需要调用工具时，只输出一个或多个如下格式的代码块（arguments 必须是合法 JSON）：\n"
+        "```tool_call\n"
+        '{"name": "工具名", "arguments": {参数对象}}\n'
+        "```\n"
+        "工具名必须逐字使用 [工具调用说明] 中列出的名字，不要自造 bash / shell 之类的通用名。\n"
+        "禁止输出 <｜DSML｜ ...>、<invoke>/<parameter>、<tool_calls> 等 XML/DSL 标记"
+        "——它们不会被执行。"
+    )
 
 
-def _normalize_tool_entry(entry: Any) -> Optional[Dict[str, Any]]:
+def _normalize_tool_entry(entry: Any) -> dict[str, Any] | None:
     if not isinstance(entry, dict):
         return None
     function = entry.get("function") or {}
@@ -110,16 +116,14 @@ def _normalize_tool_entry(entry: Any) -> Optional[Dict[str, Any]]:
     if arguments is None:
         arguments = {}
     if isinstance(arguments, str):
-        try:
+        with contextlib.suppress(json.JSONDecodeError):
             arguments = json.loads(arguments)
-        except Exception:
-            pass
     if not name:
         return None
     return {"name": name, "arguments": arguments}
 
 
-def _tool_names(tools: Optional[List[Dict[str, Any]]]) -> set:
+def _tool_names(tools: list[dict[str, Any]] | None) -> set:
     """从 OpenAI tools 描述里收集合法工具名，用于过滤误报。"""
     names = set()
     for tool in tools or []:
@@ -151,12 +155,11 @@ def _iter_balanced_objects(text: str):
             if depth == 0:
                 start = index
             depth += 1
-        elif ch == "}":
-            if depth > 0:
-                depth -= 1
-                if depth == 0 and start >= 0:
-                    yield text[start:index + 1]
-                    start = -1
+        elif ch == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start >= 0:
+                yield text[start:index + 1]
+                start = -1
 
 
 def _dsml_blocks(open_re, close_re, text: str):
@@ -183,13 +186,13 @@ def _dsml_blocks(open_re, close_re, text: str):
             return
 
 
-def _dsml_attr(attrs: str, key: str) -> Optional[str]:
+def _dsml_attr(attrs: str, key: str) -> str | None:
     """从开标签的属性串里取 ``key=\"value\"``。"""
     match = re.search(rf'(?:^|\s){re.escape(key)}\s*=\s*"([^"]*)"', attrs)
     return match.group(1) if match else None
 
 
-def _dsml_param_value(raw: str, string_attr: Optional[str]) -> Any:
+def _dsml_param_value(raw: str, string_attr: str | None) -> Any:
     """DSML parameter 内容 -> Python 值。
 
     ``string=\"true\"`` 原样保留；其余情况若整体是 JSON 标量/结构则还原类型
@@ -201,12 +204,12 @@ def _dsml_param_value(raw: str, string_attr: Optional[str]) -> Any:
     if value[:1] in "{[" or _DSML_SCALAR_RE.fullmatch(value):
         try:
             return json.loads(value)
-        except Exception:
+        except json.JSONDecodeError:
             return value
     return value
 
 
-def _resolve_dsml_name(name: str, valid_names: Optional[set]) -> str:
+def _resolve_dsml_name(name: str, valid_names: set | None) -> str:
     """把 DSML invoke 的工具名对齐到客户端工具名；对不上就原样返回（后续过滤）。"""
     if not name:
         return name
@@ -225,14 +228,14 @@ def _resolve_dsml_name(name: str, valid_names: Optional[set]) -> str:
     return name
 
 
-def _parse_dsml_invokes(text: str, valid_names: Optional[set] = None) -> List[Dict[str, Any]]:
+def _parse_dsml_invokes(text: str, valid_names: set | None = None) -> list[dict[str, Any]]:
     """解析 DSML 结构化工具调用（invoke/parameter 形态）。"""
-    calls: List[Dict[str, Any]] = []
+    calls: list[dict[str, Any]] = []
     for attrs, body in _dsml_blocks(_DSML_INVOKE_OPEN_RE, _DSML_INVOKE_CLOSE_RE, text):
         name = _dsml_attr(attrs, "name")
         if not name:
             continue
-        arguments: Dict[str, Any] = {}
+        arguments: dict[str, Any] = {}
         for pattrs, pvalue in _dsml_blocks(_DSML_PARAM_OPEN_RE, _DSML_PARAM_CLOSE_RE, body):
             pname = _dsml_attr(pattrs, "name")
             if not pname:
@@ -242,7 +245,7 @@ def _parse_dsml_invokes(text: str, valid_names: Optional[set] = None) -> List[Di
     return calls
 
 
-def parse_tool_calls(text: str, valid_names: Optional[set] = None) -> List[Dict[str, Any]]:
+def parse_tool_calls(text: str, valid_names: set | None = None) -> list[dict[str, Any]]:
     """从模型回复中解析出工具调用列表。返回 [{"name": ..., "arguments": {...}}, ...]
 
     需要兼容两种形态：
@@ -254,7 +257,7 @@ def parse_tool_calls(text: str, valid_names: Optional[set] = None) -> List[Dict[
     if not text:
         return []
 
-    calls: List[Dict[str, Any]] = []
+    calls: list[dict[str, Any]] = []
 
     def _consume(raw: str, allow_bare_object: bool) -> None:
         raw = raw.strip()
@@ -262,7 +265,7 @@ def parse_tool_calls(text: str, valid_names: Optional[set] = None) -> List[Dict[
             return
         try:
             data = json.loads(raw)
-        except Exception:
+        except json.JSONDecodeError:
             return
         if isinstance(data, dict) and isinstance(data.get("tool_calls"), list):
             entries = data["tool_calls"]
@@ -345,7 +348,7 @@ def parse_tool_calls(text: str, valid_names: Optional[set] = None) -> List[Dict[
     return calls
 
 
-def to_tool_call_models(calls: List[Dict[str, Any]]) -> List[ToolCall]:
+def to_tool_call_models(calls: list[dict[str, Any]]) -> list[ToolCall]:
     return [
         ToolCall(
             function=FunctionCall(

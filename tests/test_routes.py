@@ -17,9 +17,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import deepseek_api_server as srv  # noqa: E402
-from deepseek_web import config, server  # noqa: E402
-from deepseek_web.driver import (  # noqa: E402
+from fastapi import params
+
+import deepseek_api_server as srv
+from deepseek_web import config, server
+from deepseek_web.driver import (
     DeepSeekBusyError,
     DeepSeekContextLimitError,
     DeepSeekTimeoutError,
@@ -167,9 +169,11 @@ class EmptyPromptTests(RouteTestCase):
 
 class DebugDomTests(RouteTestCase):
     def test_hidden_by_default(self):
-        with unittest.mock.patch.object(config, "DEBUG", False):
-            with self.assertRaises(server.HTTPException) as ctx:
-                asyncio.run(server.debug_dom())
+        with (
+            unittest.mock.patch.object(config, "DEBUG", False),
+            self.assertRaises(server.HTTPException) as ctx,
+        ):
+            asyncio.run(server.debug_dom())
         self.assertEqual(ctx.exception.status_code, 404)
 
     def test_enabled_under_debug(self):
@@ -265,8 +269,13 @@ class SessionKeyTests(RouteTestCase):
         self.assertIsNone(self.fake.chats[-1]["key"])
 
     def test_route_declares_the_configurable_header(self):
+        # 路由用 ``Annotated[..., Header(alias=...)]`` 声明（FAST002 的写法），
+        # 因此头名在 annotation 的 metadata 里，而不是参数默认值上。
         param = inspect.signature(server.chat_completions).parameters["x_deepseek_session"]
-        self.assertEqual(param.default.alias, config.SESSION_KEY_HEADER)
+        header = next(
+            meta for meta in param.annotation.__metadata__ if isinstance(meta, params.Header)
+        )
+        self.assertEqual(header.alias, config.SESSION_KEY_HEADER)
 
 
 class CompletionShapeTests(RouteTestCase):
@@ -318,10 +327,7 @@ class CompletionShapeTests(RouteTestCase):
 class StreamingRouteTests(RouteTestCase):
     def drain(self, response):
         async def consume():
-            chunks = []
-            async for chunk in response.body_iterator:
-                chunks.append(chunk)
-            return chunks
+            return [chunk async for chunk in response.body_iterator]
 
         return asyncio.run(consume())
 

@@ -58,39 +58,6 @@ from deepseek_web.config import (  # noqa: F401
     env_str,
 )
 
-# ---- 数据模型 ----
-from deepseek_web.models import (  # noqa: F401
-    ChatCompletionRequest,
-    ChatCompletionResponse,
-    ChatMessage,
-    Choice,
-    ChoiceMessage,
-    FunctionCall,
-    ModelCard,
-    ModelListResponse,
-    SUPPORTED_MODELS,
-    ToolCall,
-    Usage,
-)
-
-# ---- 工具调用 ----
-from deepseek_web.toolcalls import (  # noqa: F401
-    _iter_balanced_objects,
-    _normalize_tool_entry,
-    _tool_names,
-    format_tools_instruction,
-    parse_tool_calls,
-    to_tool_call_models,
-)
-
-# ---- 提示词与文本工具 ----
-from deepseek_web.prompting import (  # noqa: F401
-    _content_to_text,
-    _delta_piece,
-    build_prompt,
-    estimate_tokens,
-)
-
 # ---- Driver / 流式 / 路由 ----
 from deepseek_web.driver import (  # noqa: F401
     DEFAULT_SESSION_KEY,
@@ -100,7 +67,29 @@ from deepseek_web.driver import (  # noqa: F401
     DeepSeekWebDriver,
     SessionState,
 )
-from deepseek_web.streaming import _chunk_text, _stream_chat_completion  # noqa: F401
+
+# ---- 数据模型 ----
+from deepseek_web.models import (  # noqa: F401
+    SUPPORTED_MODELS,
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ChatMessage,
+    Choice,
+    ChoiceMessage,
+    FunctionCall,
+    ModelCard,
+    ModelListResponse,
+    ToolCall,
+    Usage,
+)
+
+# ---- 提示词与文本工具 ----
+from deepseek_web.prompting import (  # noqa: F401
+    _content_to_text,
+    _delta_piece,
+    build_prompt,
+    estimate_tokens,
+)
 from deepseek_web.server import (  # noqa: F401
     _session_key,
     app,
@@ -113,7 +102,17 @@ from deepseek_web.server import (  # noqa: F401
     reset_session,
     root,
 )
+from deepseek_web.streaming import _chunk_text, _stream_chat_completion  # noqa: F401
 
+# ---- 工具调用 ----
+from deepseek_web.toolcalls import (  # noqa: F401
+    _iter_balanced_objects,
+    _normalize_tool_entry,
+    _tool_names,
+    format_tools_instruction,
+    parse_tool_calls,
+    to_tool_call_models,
+)
 
 if __name__ == "__main__":
     import uvicorn

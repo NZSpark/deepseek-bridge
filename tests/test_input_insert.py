@@ -24,11 +24,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import deepseek_api_server as srv  # noqa: E402
-from deepseek_web import config  # noqa: E402
+import deepseek_api_server as srv
+from deepseek_web import config
+
+#: 分块写入的块大小，避免测试里散落裸魔数。
+CHUNK_CHARS = 1000
 
 
-class FillTimeout(Exception):
+class FillTimeoutError(Exception):
     """模拟 Playwright 的 TimeoutError（只用于假 page）。"""
 
 
@@ -52,7 +55,7 @@ class FakeComposer:
         if self.fill_lands:
             # 真机签名：fill 报超时，但输入框同时长出了整条文本
             self.text = text
-        raise FillTimeout("waiting for element to be visible, enabled and editable")
+        raise FillTimeoutError("waiting for element to be visible, enabled and editable")
 
     async def evaluate(self, script, *args):
         if "typeof el.value === 'string'" in script:
@@ -147,9 +150,12 @@ class FakeNode:
 class FakePage:
     """假页面：``query_selector_all`` 第一次是发送前的 baseline，之后按脚本返回回复。"""
 
-    def __init__(self, composer=None, baseline=(), script=(), generating=(False,),
-                 enter_submits=True, button_submits=True, button_present=False,
-                 page_text="", enter_reveals_prompt=None, remount_on_submit=False):
+    # 扁平列出比包一层配置更直观看得清，因此保留多参数
+    def __init__(  # noqa: PLR0913 测试替身：每个开关对应一条被测分支
+        self, composer=None, *, baseline=(), script=(), generating=(False,),
+        enter_submits=True, button_submits=True, button_present=False,
+        page_text="", enter_reveals_prompt=None, remount_on_submit=False,
+    ):
         self.composer = composer if composer is not None else FakeComposer()
         self.baseline = list(baseline)
         self.script = list(script) or [[None]]
@@ -288,7 +294,7 @@ class FillTests(InputTestCase):
         asyncio.run(driver._fill_prompt(page, prompt))
         self.assertEqual(composer.text, prompt)
         self.assertGreater(len(page.keyboard.inserted), 1)
-        self.assertTrue(all(len(part) <= 1000 for part in page.keyboard.inserted))
+        self.assertTrue(all(len(part) <= CHUNK_CHARS for part in page.keyboard.inserted))
         self.assertEqual("".join(page.keyboard.inserted), prompt)
 
     def test_chunked_insert_resumes_from_partial_prefix(self):
@@ -315,9 +321,11 @@ class FillTests(InputTestCase):
         page = FakePage(composer=composer)
         page.keyboard.insert_text_fails = True
         driver = self.driver_for(page)
-        with unittest.mock.patch.object(config, "FILL_RETRIES", 1):
-            with self.assertRaises(RuntimeError) as ctx:
-                asyncio.run(driver._fill_prompt(page, "X" * 3000))
+        with (
+            unittest.mock.patch.object(config, "FILL_RETRIES", 1),
+            self.assertRaises(RuntimeError) as ctx,
+        ):
+            asyncio.run(driver._fill_prompt(page, "X" * 3000))
         message = str(ctx.exception)
         self.assertIn("写入输入框连续失败", message)
         self.assertIn("分块插入", message)
@@ -334,9 +342,11 @@ class FillTests(InputTestCase):
         composer = UnreadableComposer(fill_ok=False, fill_lands=False)
         page = FakePage(composer=composer)
         driver = self.driver_for(page)
-        with unittest.mock.patch.object(config, "FILL_RETRIES", 1):
-            with self.assertRaises(RuntimeError):
-                asyncio.run(driver._fill_prompt(page, "hello"))
+        with (
+            unittest.mock.patch.object(config, "FILL_RETRIES", 1),
+            self.assertRaises(RuntimeError),
+        ):
+            asyncio.run(driver._fill_prompt(page, "hello"))
         self.assertEqual(composer.fill_calls, ["hello"])
 
 
@@ -387,9 +397,11 @@ class SubmitTests(InputTestCase):
         page = FakePage(composer=composer, enter_submits=False, button_submits=False,
                         button_present=False)
         driver = self.driver_for(page)
-        with unittest.mock.patch.object(config, "SUBMIT_VERIFY_MS", 50):
-            with self.assertRaises(RuntimeError) as ctx:
-                asyncio.run(driver._submit_prompt(page, composer))
+        with (
+            unittest.mock.patch.object(config, "SUBMIT_VERIFY_MS", 50),
+            self.assertRaises(RuntimeError) as ctx,
+        ):
+            asyncio.run(driver._submit_prompt(page, composer))
         message = str(ctx.exception)
         self.assertIn("未能提交", message)
         self.assertIn("输入框仍有 2 字符", message)
@@ -444,9 +456,11 @@ class SendPathTests(InputTestCase):
         page = FakePage(composer=composer, enter_submits=False, button_submits=False,
                         button_present=False, script=[["不该被读到的回复"]])
         driver = self.driver_for(page)
-        with unittest.mock.patch.object(config, "SUBMIT_VERIFY_MS", 50):
-            with self.assertRaises(RuntimeError) as ctx:
-                asyncio.run(driver._send_chat_locked("hi"))
+        with (
+            unittest.mock.patch.object(config, "SUBMIT_VERIFY_MS", 50),
+            self.assertRaises(RuntimeError) as ctx,
+        ):
+            asyncio.run(driver._send_chat_locked("hi"))
         self.assertIn("未能提交", str(ctx.exception))
         # 没有静默等到轮询超时：连一轮回复都没有读
         self.assertEqual(page.query_calls, 1)  # 只有发送前的 baseline

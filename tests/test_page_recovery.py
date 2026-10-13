@@ -22,9 +22,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import deepseek_api_server as srv  # noqa: E402
-from deepseek_web import config  # noqa: E402
-from deepseek_web.driver import (  # noqa: E402
+import deepseek_api_server as srv
+from deepseek_web import config
+from deepseek_web.driver import (
     DEFAULT_SESSION_KEY,
     DeepSeekPageLostError,
 )
@@ -104,7 +104,7 @@ class HealthyPage:
         if "style.display = 'none'" in script:
             return ""
         if "document.readyState" in script:  # _PAGE_DIAG_JS
-            return '{"url": "%s"}' % self.url
+            return f'{{"url": "{self.url}"}}'
         return False
 
 

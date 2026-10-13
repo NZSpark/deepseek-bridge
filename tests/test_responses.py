@@ -14,8 +14,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from deepseek_web import responses  # noqa: E402
-from deepseek_web.driver import (  # noqa: E402
+from deepseek_web import responses
+from deepseek_web.driver import (
     DeepSeekBusyError,
     DeepSeekContextLimitError,
     DeepSeekTimeoutError,
@@ -197,10 +197,9 @@ class StreamTests(unittest.TestCase):
         chat = responses.to_chat_request(req)
 
         async def go():
-            events = []
-            async for chunk in responses.stream_responses(chat, driver, None):
-                events.append(chunk)
-            return events
+            return [
+                chunk async for chunk in responses.stream_responses(chat, driver, None)
+            ]
 
         return run(go())
 

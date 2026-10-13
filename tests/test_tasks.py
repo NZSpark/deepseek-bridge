@@ -11,8 +11,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from deepseek_web import config, tasks  # noqa: E402
-from deepseek_web.models import ChatMessage  # noqa: E402
+from deepseek_web import config, tasks
+from deepseek_web.models import ChatMessage
 
 
 class TaskSnapshotTests(unittest.TestCase):
@@ -30,7 +30,7 @@ class TaskSnapshotTests(unittest.TestCase):
         config.TASK_SNAPSHOT_ENABLED = self._orig_enabled
 
     @staticmethod
-    def _msgs(*pairs):  # noqa: D401
+    def _msgs(*pairs):
         return [ChatMessage(role=r, content=c) for r, c in pairs]
 
     def test_record_writes_goal_and_recent(self):
@@ -65,7 +65,9 @@ class TaskSnapshotTests(unittest.TestCase):
 
     def test_goal_is_sticky_across_turns(self):
         tasks.record("t", self._msgs(("user", "原始目标")))
-        tasks.record("t", self._msgs(("user", "原始目标"), ("assistant", "步骤1"), ("user", "继续")))
+        tasks.record(
+            "t", self._msgs(("user", "原始目标"), ("assistant", "步骤1"), ("user", "继续"))
+        )
         data = tasks.load("t")
         self.assertEqual(data["goal"], "原始目标")
         self.assertEqual(data["turns"], 2)

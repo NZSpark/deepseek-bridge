@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import deepseek_api_server as srv  # noqa: E402
+import deepseek_api_server as srv
 
 
 class ContentToTextTests(unittest.TestCase):

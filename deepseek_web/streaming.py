@@ -5,7 +5,7 @@ import json
 import time
 import traceback
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from . import config
 from .driver import DeepSeekBusyError, DeepSeekContextLimitError, DeepSeekTimeoutError
@@ -13,8 +13,12 @@ from .models import ChatCompletionRequest
 from .prompting import estimate_tokens
 from .toolcalls import _tool_names, parse_tool_calls
 
+#: SSE 合成流的分帧大小：客户端看到的「增量」就是这个粒度的切片。
+#: 短回复只有 1 帧是正常的；长回复的帧数 = ceil(len/CHUNK_CHARS)。
+CHUNK_CHARS = 64
 
-def _chunk_text(text: str, size: int = 64) -> List[str]:
+
+def _chunk_text(text: str, size: int = CHUNK_CHARS) -> list[str]:
     return [text[i:i + size] for i in range(0, len(text), size)] or [""]
 
 
@@ -28,7 +32,7 @@ async def _stream_bridge_reply(request: ChatCompletionRequest, reply: str):
     created = int(time.time())
     model = request.model
 
-    def encode(delta: Optional[Dict[str, Any]], finish: Optional[str] = None) -> str:
+    def encode(delta: dict[str, Any] | None, finish: str | None = None) -> str:
         payload = {
             "id": chat_id,
             "object": "chat.completion.chunk",
@@ -69,8 +73,8 @@ async def _stream_chat_completion(
     request: ChatCompletionRequest,
     prompt: str,
     driver,
-    seeded_prompt: Optional[str] = None,
-    session_key: Optional[str] = None,
+    seeded_prompt: str | None = None,
+    session_key: str | None = None,
 ):
     """以 OpenAI SSE 格式输出 chunk，兼容 Pi 的 openai-completions 流式解析。
 
@@ -83,8 +87,8 @@ async def _stream_chat_completion(
     model = request.model
     wants_tools = bool(request.tools) and request.tool_choice != "none"
 
-    def encode(delta: Optional[Dict[str, Any]], finish: Optional[str] = None,
-               choices: Optional[list] = None) -> str:
+    def encode(delta: dict[str, Any] | None, finish: str | None = None,
+               choices: list | None = None) -> str:
         payload = {
             "id": chat_id,
             "object": "chat.completion.chunk",
@@ -99,7 +103,7 @@ async def _stream_chat_completion(
     # 先发 role 头
     yield encode({"role": "assistant"})
 
-    queue: "asyncio.Queue[tuple]" = asyncio.Queue()
+    queue: asyncio.Queue[tuple] = asyncio.Queue()
 
     async def on_delta(piece: str):
         await queue.put(("delta", piece))
@@ -136,14 +140,14 @@ async def _stream_chat_completion(
 
     streamed = False
     reply_content = ""
-    error: Optional[str] = None
+    error: str | None = None
     error_type = "server_error"
     keepalives = 0
 
     while True:
         try:
             kind, payload = await asyncio.wait_for(queue.get(), timeout=10.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # 网页版生成较慢，发送 SSE 注释保活，避免 Pi 侧超时断连。
             # 带 tools 时回复必须先完整缓冲才能判断是不是 tool_calls，
             # 因此这段时间客户端看不到内容 —— 用注释保活 + 日志保持可观测。
@@ -166,7 +170,10 @@ async def _stream_chat_completion(
     await task
 
     if error:
-        yield f"data: {json.dumps({'error': {'message': error, 'type': error_type}}, ensure_ascii=False)}\n\n"
+        payload = json.dumps(
+            {"error": {"message": error, "type": error_type}}, ensure_ascii=False
+        )
+        yield f"data: {payload}\n\n"
         yield "data: [DONE]\n\n"
         return
 

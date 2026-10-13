@@ -7,7 +7,7 @@ Pi Coding Agent (pi.dev) 通过 models.json 里的 "api": "openai-completions"
 
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -32,10 +32,10 @@ class ChatMessage(BaseModel):
     # content 可能是字符串，也可能是内容分片数组
     # （如 [{"type": "text", "text": "hi"}]，Pi / 新版 OpenAI 客户端会这样发），
     # 因此用 Any 宽松接收，构建 prompt 时再归一化为纯文本。
-    content: Optional[Any] = None
-    name: Optional[str] = None
-    tool_calls: Optional[List[ToolCall]] = None
-    tool_call_id: Optional[str] = None
+    content: Any | None = None
+    name: str | None = None
+    tool_calls: list[ToolCall] | None = None
+    tool_call_id: str | None = None
 
 
 class ChatCompletionRequest(BaseModel):
@@ -44,22 +44,22 @@ class ChatCompletionRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     model: str = "deepseek-chat"
-    messages: List[ChatMessage]
-    stream: Optional[bool] = False
-    stream_options: Optional[Dict[str, Any]] = None
-    tools: Optional[List[Dict[str, Any]]] = None
-    tool_choice: Optional[Any] = None
+    messages: list[ChatMessage]
+    stream: bool | None = False
+    stream_options: dict[str, Any] | None = None
+    tools: list[dict[str, Any]] | None = None
+    tool_choice: Any | None = None
     # 网页版无法控制生成参数，以下字段仅作兼容占位（接收但不生效）
-    temperature: Optional[float] = None
-    top_p: Optional[float] = None
-    max_tokens: Optional[int] = None
-    stop: Optional[Any] = None
+    temperature: float | None = None
+    top_p: float | None = None
+    max_tokens: int | None = None
+    stop: Any | None = None
 
 
 class ChoiceMessage(BaseModel):
     role: str = "assistant"
-    content: Optional[str] = None
-    tool_calls: Optional[List[ToolCall]] = None
+    content: str | None = None
+    tool_calls: list[ToolCall] | None = None
 
 
 class Choice(BaseModel):
@@ -79,7 +79,7 @@ class ChatCompletionResponse(BaseModel):
     object: str = "chat.completion"
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str = "deepseek-chat"
-    choices: List[Choice]
+    choices: list[Choice]
     usage: Usage = Field(default_factory=Usage)
 
 
@@ -92,7 +92,7 @@ class ModelCard(BaseModel):
 
 class ModelListResponse(BaseModel):
     object: str = "list"
-    data: List[ModelCard]
+    data: list[ModelCard]
 
 
 # Pi 的 models.json 里引用的 id 需要与这里一致
@@ -102,7 +102,7 @@ SUPPORTED_MODELS = [
 ]
 
 
-def advertised_models() -> List[Dict[str, Any]]:
+def advertised_models() -> list[dict[str, Any]]:
     """本桥对外公布的模型列表。
 
     单一数据源：``GET /v1/models`` 与桥内命令 ``/bridge models`` 都读它，

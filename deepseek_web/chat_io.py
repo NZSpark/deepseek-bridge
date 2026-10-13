@@ -12,8 +12,8 @@
 """
 
 import asyncio
+import contextlib
 import re
-from typing import List, Optional
 
 from . import config
 from .errors import (
@@ -24,8 +24,11 @@ from .errors import (
 )
 from .prompting import _delta_piece, estimate_tokens
 
+#: prompt 头部至少要这么长才值得作为「这段 prompt 已经出现」的证据（太短会误命中）。
+_PRESENCE_MIN_CHARS = 12
 
-class ChunkedInsertUnavailable(RuntimeError):
+
+class ChunkedInsertUnavailableError(RuntimeError):
     """分块插入在本页面**一个字都写不进去**：调用方应退回整段 ``fill()``。
 
     与「写了但慢」区分开：只有 ``written == 0`` 才抛这个，表示两种插入原语
@@ -40,9 +43,9 @@ class ChatIOMixin:
         self,
         prompt: str,
         on_delta=None,
-        seeded_prompt: Optional[str] = None,
-        key: Optional[str] = None,
-    ) -> tuple[str, List[dict]]:
+        seeded_prompt: str | None = None,
+        key: str | None = None,
+    ) -> tuple[str, list[dict]]:
         """发送单条消息并获取响应。
 
         :param prompt: 增量 prompt（网页会话已有上下文时使用）
@@ -64,7 +67,7 @@ class ChatIOMixin:
         bucket = key or DEFAULT_SESSION_KEY
         seeded = seeded_prompt or prompt
         max_attempts = max(1, config.MAX_UPSTREAM_RETRIES)
-        last_error: Optional[RuntimeError] = None
+        last_error: RuntimeError | None = None
         page_rebuilt = False   # 上一轮是否刚因为“页面失效”重建过（避免再走恢复阶梯）
 
         # 整个请求生命周期内把该桶标记为「活跃」：页面回收 / LRU 淘汰绝不关闭一条
@@ -102,7 +105,9 @@ class ChatIOMixin:
                 # 即使当前会话已经有上下文（这正是它的用途：网页与客户端上下文失配）。
                 bucket_state = self._state(bucket)
                 active_prompt = (
-                    seeded if (bucket_state.pending_reseed or not bucket_state.has_history) else prompt
+                    seeded
+                    if (bucket_state.pending_reseed or not bucket_state.has_history)
+                    else prompt
                 )
                 # 先按字符预算截断再记录：sent_prompt / usage / 日志必须反映真正发出去的那份
                 active_prompt = self._clamp_prompt(active_prompt)
@@ -302,7 +307,7 @@ class ChatIOMixin:
         return max(0.1, (config.FILL_TIMEOUT_MS or 10000) / 1000.0)
 
     @staticmethod
-    def _page_lost_message(bucket: Optional[str] = None) -> str:
+    def _page_lost_message(bucket: str | None = None) -> str:
         """页面已失效时的可操作文案（与「选择器失效 / 未登录」区分开）。"""
         where = f"key={bucket}，" if bucket else ""
         return (
@@ -349,13 +354,13 @@ class ChatIOMixin:
                     node = await page.wait_for_selector(selector, timeout=timeout_ms)
                     if node:
                         return node
-                except Exception as exc:  # noqa: BLE001 选择器未命中 / 超时 / 页面失效
+                except Exception as exc:
                     if self._looks_like_page_lost(exc) or not self._page_is_alive(page):
                         raise DeepSeekPageLostError(self._page_lost_message()) from exc
                     continue
         return None
 
-    async def _composer_text(self, handle) -> Optional[str]:
+    async def _composer_text(self, handle) -> str | None:
         """读取输入框当前文本（best-effort；读不到返回 None，表示“无法判断”）。
 
         句柄已从页面断开（React 重挂载）时返回 None：旧节点上的文本是残留，
@@ -369,7 +374,7 @@ class ChatIOMixin:
             return None
         return text if isinstance(text, str) else None
 
-    async def _handle_connected(self, handle) -> Optional[bool]:
+    async def _handle_connected(self, handle) -> bool | None:
         """句柄是否仍挂在页面上（best-effort；提交误报时写进错误信息供排查）。"""
         if handle is None:
             return None
@@ -414,7 +419,7 @@ class ChatIOMixin:
         """取 prompt 开头的可比较片段；太短（<12 字符）则放弃这条证据。"""
         sample = cls._PRESENCE_STRIP_RE.sub(" ", prompt[:2000])
         sample = re.sub(r"\s+", " ", sample).strip()
-        return sample[:120] if len(sample) >= 12 else ""
+        return sample[:120] if len(sample) >= _PRESENCE_MIN_CHARS else ""
 
     @classmethod
     def _text_shows_prompt(cls, page_text: str, prompt: str) -> bool:
@@ -473,7 +478,7 @@ class ChatIOMixin:
             await asyncio.wait_for(
                 handle.evaluate("(el) => el.focus()"), timeout=self._fill_timeout_s()
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise RuntimeError("无法聚焦输入框：click 与 JS focus 均失败") from exc
 
     async def _set_caret(self, handle) -> bool:
@@ -559,27 +564,21 @@ class ChatIOMixin:
                 return
             if press is not None:
                 for modifier in ("Control+A", "Meta+A"):
-                    try:
+                    with contextlib.suppress(Exception):
                         await press(modifier)
                         await press("Backspace")
-                    except Exception:  # noqa: BLE001
-                        pass
-            try:
+            with contextlib.suppress(Exception):
                 await handle.fill("", timeout=config.FILL_TIMEOUT_MS or 5000)
-            except Exception:  # noqa: BLE001
-                pass
-            try:
+            with contextlib.suppress(Exception):
                 await asyncio.wait_for(
                     handle.evaluate(self._CLEAR_COMPOSER_JS), timeout=self._fill_timeout_s()
                 )
-            except Exception:  # noqa: BLE001
-                pass
             await asyncio.sleep(0.1)
         leftover = await self._composer_text(handle)
         if leftover:
             print(f"[输入] 清空输入框后仍读到 {len(leftover)} 字符残留，新 prompt 可能被拼接")
 
-    async def _insert_prompt_in_chunks(self, page, prompt: str, handle=None) -> Optional[int]:
+    async def _insert_prompt_in_chunks(self, page, prompt: str, handle=None) -> int | None:
         """**分块**把 prompt 写进输入框，返回已写入的字符数；读不到输入框文本时返回 None。
 
         为什么必须分块（真机复现）：客户端的 find / read 结果很长时，一次性
@@ -601,7 +600,7 @@ class ChatIOMixin:
         written = 0
         stalls = 0
         last_len = -1
-        last_source: Optional[str] = None
+        last_source: str | None = None
         focused = False
         while True:
             if handle is None:
@@ -622,7 +621,10 @@ class ChatIOMixin:
                     # 已清过一次还是对不上：说明读回**有损**（换行被渲染成块级节点、
                     # markdown 标记变成格式）。**再去清就会把刚写进去的内容删掉**，
                     # 所以改为不再清空、按“自己插入了多少”推进。
-                    print(f"[输入] 读回与 prompt 对不上（{len(current)} 字符）：不再清空，改为按已插入字符数推进")
+                    print(
+                        f"[输入] 读回与 prompt 对不上（{len(current)} 字符）："
+                        "不再清空，改为按已插入字符数推进"
+                    )
                     blind = True
                     written = 0
                 else:
@@ -638,7 +640,7 @@ class ChatIOMixin:
             if not blind:
                 # 进度判据：读回长度必须增长。有损读回只改变绝对值，不改变增减。
                 cur_len = len(await self._composer_text(handle) or "")
-                if 0 <= last_len and cur_len <= last_len:
+                if last_len >= 0 and cur_len <= last_len:
                     stalls += 1
                 else:
                     stalls = 0
@@ -650,12 +652,13 @@ class ChatIOMixin:
                             f"[输入] 分块插入完全无效（已写入 0/{len(prompt)} 字符，"
                             f"最后原语={last_source or '无'}）：{detail}"
                         )
-                        raise ChunkedInsertUnavailable(
+                        raise ChunkedInsertUnavailableError(
                             "分块插入在本页面写不进去（已写入 0 字符）"
                         )
                     print(
                         f"[输入] 分块写入无进展：读回 {cur_len} 字符"
-                        f"（已写入 {written}/{len(prompt)}，最后原语={last_source or '无'}）：{detail}"
+                        f"（已写入 {written}/{len(prompt)}，最后原语={last_source or '无'}）："
+                        f"{detail}"
                     )
                     raise RuntimeError(
                         f"分块写入无进展：已写入 {written}/{len(prompt)} 字符"
@@ -671,8 +674,11 @@ class ChatIOMixin:
                 last_source = await self._insert_chunk(
                     page, handle, piece, prefer_keyboard=(stalls == 0)
                 )
-            except Exception as exc:  # noqa: BLE001 句柄失效 / 页面卡住
-                print(f"[输入] 分块写入失败（已写入 {written}/{len(prompt)} 字符）：{exc}；重新定位后继续写")
+            except Exception as exc:
+                print(
+                    f"[输入] 分块写入失败（已写入 {written}/{len(prompt)} 字符）：{exc}；"
+                    "重新定位后继续写"
+                )
                 handle = None
                 last_source = None
                 stalls += 1
@@ -708,7 +714,7 @@ class ChatIOMixin:
         if current and self._prompt_present(prompt, current):
             print(f"[输入] 输入框已有本条 prompt（{len(current)} 字符）：跳过写入")
             return await self._locate_input(page) or chat_input
-        fill_error: Optional[Exception] = None
+        fill_error: Exception | None = None
         try:
             await chat_input.fill(prompt, timeout=timeout)
         except Exception as exc:  # noqa: BLE001 Playwright 超时等
@@ -729,12 +735,16 @@ class ChatIOMixin:
         # 只有 fill **报错**时才需要读回救援：真机见过 fill 报超时但文本已落地
         landed = await self._composer_text(chat_input)
         if landed and self._prompt_present(prompt, landed):
-            print(f"[输入] fill 报错（{fill_error}）但 {len(landed)} 字符已在输入框中：按成功继续提交")
+            print(
+                f"[输入] fill 报错（{fill_error}）但 {len(landed)} 字符已在输入框中："
+                "按成功继续提交"
+            )
             return await self._locate_input(page) or chat_input
         try:
             written = await self._insert_prompt_in_chunks(page, prompt, chat_input)
-        except ChunkedInsertUnavailable:
-            raise fill_error
+        except ChunkedInsertUnavailableError as chunk_err:
+            # 分块原语完全无效：把**最初的 fill 错误**抛出去（并保留分块失败作为上下文）
+            raise fill_error from chunk_err
         if written is None:
             # 读不到输入框文本、分块无法判断，而 fill 也已经失败：抛 fill 的错误，
             # 让上层重试（会重新定位句柄），不做无谓的第二次整段 fill。
@@ -758,7 +768,7 @@ class ChatIOMixin:
         """
         attempts = max(1, config.FILL_RETRIES)
         timeout = config.FILL_TIMEOUT_MS or None
-        last_error: Optional[Exception] = None
+        last_error: Exception | None = None
         for attempt in range(1, attempts + 1):
             chat_input = await self._locate_input(page)
             if chat_input is None:
@@ -770,7 +780,8 @@ class ChatIOMixin:
                 except Exception as exc:  # noqa: BLE001 Playwright TimeoutError 等
                     last_error = exc
                     print(
-                        f"[输入] 写入输入框失败（第 {attempt}/{attempts} 次，prompt {len(prompt)} 字符）："
+                        f"[输入] 写入输入框失败（第 {attempt}/{attempts} 次，"
+                        f"prompt {len(prompt)} 字符）："
                         f"{exc}；输入框状态={await self._composer_diag(chat_input)}"
                     )
             if attempt < attempts:
@@ -825,12 +836,14 @@ class ChatIOMixin:
         if page is None:
             return None
         for selector in config.SEND_BUTTON_SELECTORS:
-            try:
+            # 某个候选选择器可能直接抛错（无效选择器 / 页面正在导航）：跳过它试下一个。
+            # 这里刻意不 import playwright 的异常类（测试替身 / 版本差异都要能命中），
+            # 所以用 suppress 而不是 except：语义就是「这个候选不可用」。
+            button = None
+            with contextlib.suppress(Exception):
                 button = await page.query_selector(selector)
-                if button:
-                    return button
-            except Exception:  # noqa: BLE001
-                continue
+            if button:
+                return button
         return None
 
     async def _click_send_button(self, page) -> bool:
@@ -867,7 +880,7 @@ class ChatIOMixin:
         except Exception as exc:  # noqa: BLE001
             return f"（按钮状态不可读：{exc}）"
 
-    async def _prompt_submitted(self, page, chat_input, bucket: Optional[str] = None):
+    async def _prompt_submitted(self, page, chat_input, bucket: str | None = None):
         """刚才那次提交是否真的生效？返回 ``(判定, 输入框句柄)``；None = 无法判断。
 
         判据（满足其一即为已提交）：
@@ -897,7 +910,7 @@ class ChatIOMixin:
             return True, chat_input
         return False, chat_input
 
-    async def _wait_submitted(self, page, chat_input, bucket: Optional[str] = None):
+    async def _wait_submitted(self, page, chat_input, bucket: str | None = None):
         """等待「已提交」的迹象，最长 ``SUBMIT_VERIFY_MS``；返回 ``(判定, 句柄)``。
 
         为什么不能只读一次：Enter 派发后，网页要先更新内部状态、清空输入框、
@@ -913,8 +926,8 @@ class ChatIOMixin:
                 return submitted, chat_input
             await asyncio.sleep(0.1)
 
-    async def _submit_prompt(self, page, chat_input, bucket: Optional[str] = None,
-                             prompt: Optional[str] = None) -> None:
+    async def _submit_prompt(self, page, chat_input, bucket: str | None = None,
+                             prompt: str | None = None) -> None:
         """提交 prompt，并**确认它真的发出去了**（全程无窗口焦点依赖）。
 
         为什么必须确认（真实故障）：旧实现把 ``keyboard.press("Enter")`` 当作一定成功，
@@ -938,7 +951,7 @@ class ChatIOMixin:
         last_detail = "（未知）"
         # 提交前先记基线：任务重发同一段内容时，页面里可能**本来就有**这条消息，
         # 只有“提交后才新出现”才能算本轮发出的证据。
-        prompt_was_visible: Optional[bool] = None
+        prompt_was_visible: bool | None = None
         if prompt:
             prompt_was_visible = await self._page_shows_prompt(page, prompt, chat_input)
         for index, action in enumerate(plan, start=1):
@@ -975,7 +988,8 @@ class ChatIOMixin:
             detail = "页面侧无更多证据"
         attached = await self._handle_connected(chat_input)
         raise RuntimeError(
-            f"prompt 已写入输入框但未能提交（尝试 {len(plan)} 次：键盘 Enter -> 发送按钮 -> 合成 Enter）；"
+            f"prompt 已写入输入框但未能提交（尝试 {len(plan)} 次："
+            "键盘 Enter -> 发送按钮 -> 合成 Enter）；"
             f"{last_detail}；{detail}（输入框句柄仍挂载={attached}）。"
             "常见原因：发送按钮处于 disabled（编辑器还在消化长文本）、页面停在非对话视图，"
             "或按键被网页忽略。可调大 SUBMIT_VERIFY_MS；若与长 prompt 相关，"
@@ -1011,9 +1025,9 @@ class ChatIOMixin:
         )
         return prompt[:head] + notice + prompt[-tail:]
 
-    async def _extract_code_blocks(self, element) -> List[dict]:
+    async def _extract_code_blocks(self, element) -> list[dict]:
         """从某条回复的 DOM 节点中提取代码块（语言 + 纯代码文本）。"""
-        extracted: List[dict] = []
+        extracted: list[dict] = []
         if element is None:
             return extracted
         code_elements = await element.query_selector_all(config.CODE_BLOCK_SELECTOR)
@@ -1021,22 +1035,22 @@ class ChatIOMixin:
             code_tag = await code_el.query_selector(config.CODE_TAG_SELECTOR)
             lang = "txt"
             if code_tag:
-                class_attr = await code_tag.get_attribute('class') or ""
-                lang_match = re.search(r'language-(\w+)', class_attr)
+                class_attr = await code_tag.get_attribute("class") or ""
+                lang_match = re.search(r"language-(\w+)", class_attr)
                 if lang_match:
                     lang = lang_match.group(1)
 
             code_content = await (code_tag or code_el).inner_text()
             clean_code = re.sub(
-                r'^(?:' + lang + r'|bash|python|json|html|javascript)?\s*(?:Copy|Download)\s*\n',
-                '', code_content, flags=re.IGNORECASE
+                r"^(?:" + lang + r"|bash|python|json|html|javascript)?\s*(?:Copy|Download)\s*\n",
+                "", code_content, flags=re.IGNORECASE
             ).strip()
 
             extracted.append({"lang": lang, "code": clean_code})
         return extracted
 
     async def _send_chat_locked(self, prompt: str, on_delta=None,
-                                key: Optional[str] = None) -> tuple[str, List[dict]]:
+                                key: str | None = None) -> tuple[str, list[dict]]:
         """发送单条消息并获取响应及提取的代码块。
 
         :param on_delta: 可选异步回调，生成过程中实时吐出增量文本（用于 SSE 流式）。
@@ -1058,10 +1072,9 @@ class ChatIOMixin:
             #    真正写入时还会在 _fill_prompt 里**每次尝试重新定位一次**。
             if not await self._locate_input(page):
                 raise RuntimeError(
-                    "无法找到对话输入框（key={}）：{}。常见原因：页面停在非对话视图、"
-                    "登录态失效、或有弹层遮挡；若是页面刚被关闭，下一次请求会自动重建。".format(
-                        bucket, await self._page_diag(page)
-                    )
+                    f"无法找到对话输入框（key={bucket}）：{await self._page_diag(page)}。"
+                    "常见原因：页面停在非对话视图、登录态失效、或有弹层遮挡；"
+                    "若是页面刚被关闭，下一次请求会自动重建。"
                 )
 
             # 记录发送前最后一条回复的文本，用来判断“新回复是否已经出现”。
@@ -1076,7 +1089,8 @@ class ChatIOMixin:
                 before_count = len(before_nodes)
                 if before_nodes:
                     before_text = (await before_nodes[-1].inner_text()).strip()
-            except Exception:
+            except Exception:  # noqa: BLE001 基线读不到只影响「本轮回复是否出现」的判据，
+                # 按空处理即可；不让一次读失败把整轮请求打断
                 before_text = ""
 
             # 1.5 发送前最后一道护栏：把超长 prompt 压到字符预算内（默认 48000 < 50K）。
@@ -1148,7 +1162,7 @@ class ChatIOMixin:
                     raise DeepSeekPageLostError(self._page_lost_message(bucket))
                 try:
                     responses = await page.query_selector_all(config.RESPONSE_SELECTORS)
-                except Exception as exc:  # noqa: BLE001 页面失效 / 导航中
+                except Exception as exc:
                     if self._looks_like_page_lost(exc) or not self._page_is_alive(page):
                         raise DeepSeekPageLostError(self._page_lost_message(bucket)) from exc
                     raise
@@ -1166,10 +1180,9 @@ class ChatIOMixin:
                     no_node_polls += 1
                     if no_node_polls >= no_node_fail_polls:
                         raise DeepSeekTimeoutError(
-                            "连续 {} 轮未匹配到任何回复节点（RESPONSE_SELECTORS={!r}），"
-                            "疑似选择器失效或消息未成功发送。".format(
-                                no_node_polls, config.RESPONSE_SELECTORS
-                            )
+                            f"连续 {no_node_polls} 轮未匹配到任何回复节点"
+                            f"（RESPONSE_SELECTORS={config.RESPONSE_SELECTORS!r}），"
+                            "疑似选择器失效或消息未成功发送。"
                         )
                 else:
                     no_node_polls = 0
@@ -1193,8 +1206,7 @@ class ChatIOMixin:
                     # 1.1 周期性检查是否「会话到顶」。
                     #     到顶与「真的卡住」在外表上完全一样（页面不再产生新回复），
                     #     不主动看提示语就只能等到超时，而那时已经分不清原因了。
-                    if poll % cap_check_every == 0:
-                        if await self._page_shows_context_limit(bucket):
+                    if poll % cap_check_every == 0 and await self._page_shows_context_limit(bucket):
                             self._mark_context_limit(bucket)
                             raise self._context_limit_error()
                     # 1.2 兜底：新回复迟迟不出现（页面既没生成中、文本也没变）。
@@ -1210,10 +1222,8 @@ class ChatIOMixin:
                     if no_progress_polls >= no_progress_fail_polls:
                         await self._remember_session(bucket)
                         raise DeepSeekTimeoutError(
-                            "连续 {} 轮既未出现新回复、也未观测到生成中状态"
-                            "（nodes={}，before_len={}），已放弃等待。".format(
-                                no_progress_polls, len(responses), len(before_text)
-                            )
+                            f"连续 {no_progress_polls} 轮既未出现新回复、也未观测到生成中状态"
+                            f"（nodes={len(responses)}，before_len={len(before_text)}），已放弃等待。"
                         )
                 else:
                     no_progress_polls = 0
@@ -1293,11 +1303,10 @@ class ChatIOMixin:
                         self._mark_context_limit(bucket)
                         raise self._context_limit_error()
                     raise DeepSeekTimeoutError(
-                        "等待 DeepSeek 响应超时（{}s）：poll={} nodes={} "
-                        "saw_generating={} before_len={}（选择器 {}）。".format(
-                            int(config.RESPONSE_TIMEOUT_S), poll, len(responses),
-                            saw_generating, len(before_text), config.RESPONSE_SELECTORS,
-                        )
+                        f"等待 DeepSeek 响应超时（{int(config.RESPONSE_TIMEOUT_S)}s）："
+                        f"poll={poll} nodes={len(responses)} "
+                        f"saw_generating={saw_generating} "
+                        f"before_len={len(before_text)}（选择器 {config.RESPONSE_SELECTORS}）。"
                     )
 
                 await asyncio.sleep(config.POLL_INTERVAL_S)

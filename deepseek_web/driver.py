@@ -16,7 +16,7 @@
 """
 
 import asyncio
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from playwright.async_api import async_playwright
 
@@ -33,12 +33,12 @@ from .errors import (  # noqa: F401  (re-export)
 )
 from .models import ChatMessage
 from .page_pool import PagePoolMixin
-from .session_store import SessionState, SessionStoreMixin  # noqa: F401  (re-export)
+from .session_store import SessionState, SessionStoreMixin
 
 
 class DeepSeekWebDriver(PagePoolMixin, SessionStoreMixin, CompletionMixin, ChatIOMixin):
 
-    def __init__(self, user_data_dir: str = None):
+    def __init__(self, user_data_dir: str | None = None):
         user_data_dir = user_data_dir or config.USER_DATA_DIR
         self.user_data_dir = user_data_dir
         self.playwright = None
@@ -48,30 +48,30 @@ class DeepSeekWebDriver(PagePoolMixin, SessionStoreMixin, CompletionMixin, ChatI
         # 仅用于“惰性创建会话桶页面”，避免并发请求为同一 key 重复建页
         self._page_lock = asyncio.Lock()
         # 浏览器初始化失败时记录原因，让服务仍能启动并对外暴露可读错误
-        self.init_error: Optional[str] = None
+        self.init_error: str | None = None
         # 每个会话桶最近一次 send_chat **实际**发给网页版的 prompt（增量或播种
         # 由 driver 内部按会话是否有历史决定）。server / streaming 用它估算 usage，
         # 避免用调用方“预估”的那份；必须按桶隔离，否则并发时会互相覆盖。
-        self._last_prompts: Dict[str, str] = {}
+        self._last_prompts: dict[str, str] = {}
 
         # ---- 会话状态（按任务分桶，见 config.SESSION_KEY_HEADER）----
         # 每个桶持有：一条独立页面 + 独立会话状态。
         # 「默认桶」继续使用 self.page，因此不涉及分桶的旧调用/测试行为不变。
         # 会话状态里的 has_history 为 False 时必须“播种”完整上下文，
         # 否则 build_prompt 只发增量会让模型收到一条没有前因的孤立消息。
-        self._sessions: Dict[str, SessionState] = {}
-        self._pages: Dict[str, Any] = {}
+        self._sessions: dict[str, SessionState] = {}
+        self._pages: dict[str, Any] = {}
         # 每个桶页面的最后一次使用时间（time.monotonic），用于空闲回收 / LRU 淘汰
-        self._page_last_used: Dict[str, float] = {}
+        self._page_last_used: dict[str, float] = {}
         # 按桶并发时的锁（PARALLEL_BUCKETS=true 才启用；默认桶始终用 self.lock）
-        self._locks: Dict[str, asyncio.Lock] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
         # 正在处理请求（已拿到锁、正在生成）的会话桶，供 /healthz 观察多 Agent 占用。
         # 不能用“锁是否被持有”来推断：串行模式下所有桶共用一把锁，会把所有桶都算成忙。
         self._active_buckets: set = set()
         # 同一批活跃桶的可重入计数：send_chat 与 _session_lock 都会标记活跃，
         # 计数归零才算真正空闲（否则内层先退出就会把外层请求的保护提前撤掉）。
         # 页面回收 / LRU 淘汰以它为准，保证不会关掉一条正在处理请求的页面。
-        self._active_counts: Dict[str, int] = {}
+        self._active_counts: dict[str, int] = {}
 
     async def init(self):
         """初始化浏览器实例"""
@@ -82,7 +82,7 @@ class DeepSeekWebDriver(PagePoolMixin, SessionStoreMixin, CompletionMixin, ChatI
                 headless=config.HEADLESS,
                 args=["--disable-blink-features=AutomationControlled"]
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             # persistent context 不能被两个进程共用；给出可操作的提示而不是原始堆栈
             await self.playwright.stop()
             self.playwright = None
@@ -155,9 +155,9 @@ class DeepSeekWebDriver(PagePoolMixin, SessionStoreMixin, CompletionMixin, ChatI
 
     @staticmethod
     def build_prompt(
-        messages: List[ChatMessage],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        tool_choice: Optional[Any] = None,
+        messages: list[ChatMessage],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: Any | None = None,
     ) -> str:
         """把客户端发来的消息数组转换成要发给网页输入框的文本。
 

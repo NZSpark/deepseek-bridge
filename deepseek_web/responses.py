@@ -12,22 +12,20 @@ import json
 import time
 import traceback
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from . import bridge_commands, config
+from . import bridge_commands, config, tasks
 from .driver import (
+    DEFAULT_SESSION_KEY,
     DeepSeekBusyError,
     DeepSeekContextLimitError,
     DeepSeekTimeoutError,
 )
-from .driver import DEFAULT_SESSION_KEY
 from .models import ChatCompletionRequest, ChatMessage, ToolCall
 from .prompting import build_prompt, estimate_tokens
-from . import tasks
 from .toolcalls import _tool_names, parse_tool_calls
-
 
 # ==================== 请求模型（宽松接收）====================
 
@@ -38,20 +36,20 @@ class ResponsesRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     model: str = "deepseek-chat"
-    input: Optional[Any] = None
-    instructions: Optional[str] = None
-    tools: Optional[List[Dict[str, Any]]] = None
-    tool_choice: Optional[Any] = None
-    max_output_tokens: Optional[int] = None
-    stream: Optional[bool] = False
-    temperature: Optional[float] = None
-    top_p: Optional[float] = None
+    input: Any | None = None
+    instructions: str | None = None
+    tools: list[dict[str, Any]] | None = None
+    tool_choice: Any | None = None
+    max_output_tokens: int | None = None
+    stream: bool | None = False
+    temperature: float | None = None
+    top_p: float | None = None
 
 
 # ==================== 请求转换：Responses -> Chat ====================
 
 
-def _tool_to_chat(tool: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _tool_to_chat(tool: dict[str, Any]) -> dict[str, Any] | None:
     """Responses 的扁平工具 -> Chat 的嵌套 function 工具。strict 丢弃。"""
     if not isinstance(tool, dict):
         return None
@@ -80,12 +78,15 @@ def _content_parts_to_text(content: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        pieces: List[str] = []
+        pieces: list[str] = []
         for part in content:
             if isinstance(part, str):
                 pieces.append(part)
-            elif isinstance(part, dict):
-                if part.get("type") in ("input_text", "output_text", "text"):
+            elif isinstance(part, dict) and part.get("type") in (
+                "input_text",
+                "output_text",
+                "text",
+            ):
                     text = part.get("text")
                     if isinstance(text, str):
                         pieces.append(text)
@@ -96,7 +97,7 @@ def _content_parts_to_text(content: Any) -> str:
     return str(content)
 
 
-def _item_to_message(item: Dict[str, Any]) -> Optional[ChatMessage]:
+def _item_to_message(item: dict[str, Any]) -> ChatMessage | None:
     """单个 Responses input item -> ChatMessage。未知类型返回 None（宽松跳过）。"""
     if not isinstance(item, dict):
         return None
@@ -122,7 +123,7 @@ def _item_to_message(item: Dict[str, Any]) -> Optional[ChatMessage]:
 
 def to_chat_request(req: ResponsesRequest) -> ChatCompletionRequest:
     """Responses 请求 -> 内部 ChatCompletionRequest。"""
-    messages: List[ChatMessage] = []
+    messages: list[ChatMessage] = []
     if req.instructions:
         messages.append(ChatMessage(role="system", content=req.instructions))
 
@@ -161,7 +162,7 @@ def to_chat_request(req: ResponsesRequest) -> ChatCompletionRequest:
 # ==================== 响应构造：Chat -> Responses ====================
 
 
-def _usage_dict(prompt_tokens: int, completion_tokens: int) -> Dict[str, int]:
+def _usage_dict(prompt_tokens: int, completion_tokens: int) -> dict[str, int]:
     return {
         "input_tokens": prompt_tokens,
         "output_tokens": completion_tokens,
@@ -173,22 +174,24 @@ def from_chat_response(
     reply: str,
     model: str,
     prompt_tokens: int,
-    tool_calls: Optional[List[Dict[str, Any]]] = None,
-) -> Dict[str, Any]:
+    tool_calls: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """把 driver 的回复构造为 Responses 非流式响应。"""
     rid = f"resp_{uuid.uuid4().hex[:16]}"
-    output: List[Dict[str, Any]] = []
+    output: list[dict[str, Any]] = []
 
     if tool_calls:
-        for call in tool_calls:
-            output.append({
+        output.extend(
+            {
                 "type": "function_call",
                 "id": f"fc_{uuid.uuid4().hex[:12]}",
                 "call_id": f"call_{uuid.uuid4().hex[:16]}",
                 "name": call["name"],
                 "arguments": json.dumps(call["arguments"], ensure_ascii=False),
                 "status": "completed",
-            })
+            }
+            for call in tool_calls
+        )
     else:
         output.append({
             "type": "message",
@@ -213,11 +216,11 @@ def from_chat_response(
 # ==================== 错误映射 ====================
 
 
-def _error_payload(message: str, err_type: str) -> Dict[str, Any]:
+def _error_payload(message: str, err_type: str) -> dict[str, Any]:
     return {"error": {"message": message, "type": err_type}}
 
 
-def _map_exception(exc: Exception) -> Tuple[int, str]:
+def _map_exception(exc: Exception) -> tuple[int, str]:
     if isinstance(exc, DeepSeekContextLimitError):
         return 400, "context_length_exceeded"
     if isinstance(exc, DeepSeekBusyError):
@@ -232,7 +235,7 @@ def _map_exception(exc: Exception) -> Tuple[int, str]:
 # ==================== 共享执行（流式/非流式都走这里）====================
 
 
-def _resolve_session(request: ChatCompletionRequest, session_key: Optional[str], seed: bool) -> str:
+def _resolve_session(request: ChatCompletionRequest, session_key: str | None, seed: bool) -> str:
     delta = build_prompt(request.messages, request.tools, request.tool_choice)
     seeded = build_prompt(
         request.messages,
@@ -247,7 +250,7 @@ def _resolve_session(request: ChatCompletionRequest, session_key: Optional[str],
 async def run_chat(
     request: ChatCompletionRequest,
     driver,
-    session_key: Optional[str],
+    session_key: str | None,
     on_delta=None,
 ):
     """执行一次上游对话，返回 (reply, code_blocks, tool_calls, sent_prompt)。
@@ -297,7 +300,7 @@ async def run_chat(
 
 async def handle_responses(
     req: ResponsesRequest,
-    session_key: Optional[str],
+    session_key: str | None,
     driver,
 ) -> Any:
     """处理 /v1/responses。返回 dict 或 StreamingResponse。"""
@@ -338,13 +341,17 @@ async def handle_responses(
     except DeepSeekContextLimitError as exc:
         print("\n[ERR] responses: 上下文超限:")
         traceback.print_exc()
-        return JSONResponse(status_code=400, content=_error_payload(str(exc), "context_length_exceeded"))
+        return JSONResponse(
+            status_code=400, content=_error_payload(str(exc), "context_length_exceeded")
+        )
     except DeepSeekBusyError as exc:
         return JSONResponse(status_code=503, content=_error_payload(str(exc), "upstream_busy"))
     except DeepSeekTimeoutError as exc:
         return JSONResponse(status_code=504, content=_error_payload(str(exc), "timeout"))
     except ValueError as exc:
-        return JSONResponse(status_code=400, content=_error_payload(str(exc), "invalid_request_error"))
+        return JSONResponse(
+            status_code=400, content=_error_payload(str(exc), "invalid_request_error")
+        )
     except RuntimeError as exc:
         return JSONResponse(status_code=502, content=_error_payload(str(exc), "upstream_error"))
     except Exception as exc:  # noqa: BLE001
@@ -359,7 +366,7 @@ async def handle_responses(
 # ==================== 流式 SSE（命名事件）====================
 
 
-def _sse(event_type: str, payload: Dict[str, Any]) -> str:
+def _sse(event_type: str, payload: dict[str, Any]) -> str:
     """命名 SSE 事件：event 名 + data（data 载荷自带 type，Codex 反序列化要求）。"""
     data = dict(payload)
     data["type"] = event_type
@@ -369,7 +376,7 @@ def _sse(event_type: str, payload: Dict[str, Any]) -> str:
 async def stream_responses(
     request: ChatCompletionRequest,
     driver,
-    session_key: Optional[str],
+    session_key: str | None,
 ):
     """以 Responses 命名 SSE 事件流输出。"""
     import asyncio
@@ -390,7 +397,7 @@ async def stream_responses(
 
     seq = 0
 
-    def evt(event_type: str, payload: Dict[str, Any]) -> str:
+    def evt(event_type: str, payload: dict[str, Any]) -> str:
         nonlocal seq
         payload = dict(payload)
         payload["sequence_number"] = seq
@@ -405,7 +412,7 @@ async def stream_responses(
     # 关闭缓冲：此时工具模式下也会实时吐字，但若最终解析出 tool_calls，已发的文本事件
     # 不会撤回（Codex 会以 function_call 为准）。
     buffer_tools = wants_tools and config.RESPONSES_TOOL_BUFFER
-    queue: "asyncio.Queue[tuple]" = asyncio.Queue()
+    queue: asyncio.Queue[tuple] = asyncio.Queue()
 
     async def on_delta(piece: str):
         await queue.put(("delta", piece))
@@ -419,7 +426,7 @@ async def stream_responses(
             await queue.put(("done", (reply, blocks, tool_calls, sent_prompt, None, None)))
         except Exception as exc:  # noqa: BLE001
             traceback.print_exc()
-            status, err_type = _map_exception(exc)
+            _status, err_type = _map_exception(exc)
             await queue.put(("done", (None, [], [], None, str(exc), err_type)))
 
     task = asyncio.create_task(runner())
@@ -451,7 +458,7 @@ async def stream_responses(
                 queue.get(),
                 timeout=keepalive_s if keepalive_s and keepalive_s > 0 else None,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             yield ": keep-alive\n\n"
             continue
         if kind == "delta":
@@ -466,7 +473,7 @@ async def stream_responses(
             result = payload
 
     await task
-    reply, blocks, tool_calls, sent_prompt, error, err_type = result
+    reply, _blocks, tool_calls, sent_prompt, error, err_type = result
 
     if error:
         yield evt("response.failed", {
@@ -504,7 +511,7 @@ async def stream_responses(
                 "output_index": index,
                 "arguments": args_str,
             })
-        final_output: List[Dict[str, Any]] = [
+        final_output: list[dict[str, Any]] = [
             {
                 "type": "function_call",
                 "call_id": f"call_{uuid.uuid4().hex[:16]}",

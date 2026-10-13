@@ -19,9 +19,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import deepseek_api_server as srv  # noqa: E402
-from deepseek_web import bridge_commands, config, models, responses, server, tasks  # noqa: E402
-from deepseek_web.models import ChatMessage  # noqa: E402
+import deepseek_api_server as srv
+from deepseek_web import bridge_commands, config, models, responses, server, tasks
+from deepseek_web.models import ChatMessage
 
 SESSION_URL = "https://chat.deepseek.com/a/chat/s/483878e7-7179-4e63-a19b-365ad11a686e"
 SESSION_ID = "483878e7-7179-4e63-a19b-365ad11a686e"
@@ -222,7 +222,9 @@ class HelpTests(unittest.TestCase):
     def test_topic_help_filters_groups(self):
         reply, _ = call_handle("/bridge help session")
         self.assertIn("/bridge session reset", reply)
-        self.assertIn("没有这个帮助主题", bridge_commands.parse_command("/bridge help settings").reason)
+        self.assertIn(
+            "没有这个帮助主题", bridge_commands.parse_command("/bridge help settings").reason
+        )
 
     def test_every_registry_entry_is_executable(self):
         # 帮助与实现不能漂移：注册表里的每条命令（去掉 [可选] 段后的最小形式）都要真的能执行
@@ -482,8 +484,9 @@ class ResponsesCommandTests(unittest.TestCase):
         events = []
 
         async def collect():
-            async for chunk in responses.stream_responses(request, self.fake, None):
-                events.append(chunk)
+            events.extend(
+                [chunk async for chunk in responses.stream_responses(request, self.fake, None)]
+            )
 
         asyncio.run(collect())
         text = "".join(events)

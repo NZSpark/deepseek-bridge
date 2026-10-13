@@ -6,7 +6,6 @@
 
 import json
 import re
-from typing import List, Optional
 
 from . import config
 from .errors import DeepSeekContextLimitError
@@ -21,7 +20,8 @@ class CompletionMixin:
       // 也要匹配 [aria-label]：很多网页版把「停止生成」做成只有 aria-label 的图标按钮
       // （class 里不含 stop），不把 aria-label 纳入候选就会漏判「生成中」。
       const nodes = document.querySelectorAll(
-        'button, [role="button"], [aria-label], div[class*="stop"], span[class*="stop"], svg[class*="stop"]'
+        'button, [role="button"], [aria-label], div[class*="stop"], ' +
+        'span[class*="stop"], svg[class*="stop"]'
       );
       for (const el of nodes) {
         const label = [
@@ -42,7 +42,7 @@ class CompletionMixin:
     }
     """
 
-    async def _page_is_generating(self, key: Optional[str] = None) -> Optional[bool]:
+    async def _page_is_generating(self, key: str | None = None) -> bool | None:
         """检测页面是否仍在生成回复。
 
         True=生成中；False=页面上找不到「停止生成」控件；None=检测失败/无法判断。
@@ -53,14 +53,16 @@ class CompletionMixin:
             return None
         try:
             return bool(await page.evaluate(self._GENERATING_JS))
-        except Exception:
+        except Exception:  # noqa: BLE001 页面随时可能被关掉 / 导航；这里只求「问不到就不知道」，
+            # 且刻意不 import playwright 的异常类（测试替身与版本差异都要能命中）
             return None
 
     _STOP_CANDIDATES_JS = """
     () => {
       const words = ['\u505c\u6b62', 'stop', 'Stop', 'STOP'];
       const nodes = document.querySelectorAll(
-        'button, [role="button"], div[class*="stop"], span[class*="stop"], svg[class*="stop"], [aria-label]'
+        'button, [role="button"], div[class*="stop"], ' +
+        'span[class*="stop"], svg[class*="stop"], [aria-label]'
       );
       const out = [];
       for (const el of nodes) {
@@ -87,7 +89,7 @@ class CompletionMixin:
     }
     """
 
-    async def debug_stop_candidates(self, key: Optional[str] = None) -> List[dict]:
+    async def debug_stop_candidates(self, key: str | None = None) -> list[dict]:
         """诊断用：列出页面上所有「可能表示生成中」的控件及其位置。"""
         page = self._page_for(key)
         if page is None:
@@ -123,7 +125,7 @@ class CompletionMixin:
     }
     """
 
-    async def _click_continue_if_present(self, key: Optional[str] = None) -> Optional[str]:
+    async def _click_continue_if_present(self, key: str | None = None) -> str | None:
         """若页面存在「继续生成」按钮则点击它，返回按钮文案；没有则返回 None。
 
         用于网页版把一次回复截断成多段时自动续接，拼出完整回复。
@@ -138,7 +140,8 @@ class CompletionMixin:
             result = await page.evaluate(
                 self._CONTINUE_BUTTON_JS_TEMPLATE, config.CONTINUE_BUTTON_TEXTS
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 页面随时可能被关掉 / 导航；这里只求「问不到就不知道」，
+            # 且刻意不 import playwright 的异常类（测试替身与版本差异都要能命中）
             return None
         if isinstance(result, dict) and result.get("clicked"):
             return str(result.get("text") or "继续")
@@ -151,7 +154,7 @@ class CompletionMixin:
         " return text; }"
     )
 
-    async def _page_shows_context_limit(self, key: Optional[str] = None) -> bool:
+    async def _page_shows_context_limit(self, key: str | None = None) -> bool:
         """页面是否出现“对话长度上限”类提示。
 
         先把模型回复节点的文本从整页文本里剔除，避免把回复正文里提到
@@ -163,7 +166,7 @@ class CompletionMixin:
         js = self._CAP_CHECK_JS_TEMPLATE % json.dumps(config.RESPONSE_SELECTORS)
         try:
             page_text = await page.evaluate(js)
-        except Exception:
+        except Exception:  # noqa: BLE001 同上：探测失败一律按「没到顶」处理，不让轮询线程死掉
             return False
         for pattern in config.CAP_NOTICE_PATTERNS:
             try:
@@ -173,19 +176,19 @@ class CompletionMixin:
                 continue
         return False
 
-    def _mark_context_limit(self, key: Optional[str] = None) -> None:
+    def _mark_context_limit(self, key: str | None = None) -> None:
         state = self._state(key)
         state.cap_hit = True
         state.last_error = "context_length_exceeded"
         self._save_session_state(key=key)
 
-    def _context_limit_error(self) -> "DeepSeekContextLimitError":
+    def _context_limit_error(self) -> DeepSeekContextLimitError:
         return DeepSeekContextLimitError(
             "DeepSeek 网页会话已达上下文长度上限（网页版会停止响应）。"
             "本服务会自动轮转到新会话并播种历史；若仍失败，请检查登录状态。"
         )
 
-    async def _recover_session(self, key: Optional[str] = None) -> bool:
+    async def _recover_session(self, key: str | None = None) -> bool:
         """超时后根据保存的会话地址重新进入会话，成功返回 True。"""
         page = self._page_for(key)
         saved = self._saved_session_url(key)

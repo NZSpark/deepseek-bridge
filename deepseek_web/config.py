@@ -113,7 +113,9 @@ CONTINUE_BUTTON_MAX = env_int("CONTINUE_BUTTON_MAX", 5)
 # 「继续」按钮文案（大小写不敏感），用于识别底部区域可见的继续控件。
 CONTINUE_BUTTON_TEXTS = [
     t.strip()
-    for t in env_str("CONTINUE_BUTTON_TEXTS", "继续||continue||继续生成||continue generating").split("||")
+    for t in env_str(
+        "CONTINUE_BUTTON_TEXTS", "继续||continue||继续生成||continue generating"
+    ).split("||")
     if t.strip()
 ]
 
@@ -186,7 +188,8 @@ SESSION_KEY_HEADER = env_str("SESSION_KEY_HEADER", "X-DeepSeek-Session")
 SESSION_SCOPING = env_bool("SESSION_SCOPING", True)
 # 当请求头与 user 字段都缺失时，是否允许**按 User-Agent 自动分桶**（不同客户端自动隔离）。
 # 默认开：不同 AI 编程助手自动各用一条 DeepSeek 会话。关闭后退回旧的「默认桶，全局共用」行为。
-# 注意：自动分桶会使桶数随客户端数量增长，实际受 MAX_SESSION_BUCKETS 约束（超出按 LRU 回收页面，状态保留）。
+# 注意：自动分桶会使桶数随客户端数量增长，实际受 MAX_SESSION_BUCKETS 约束
+# （超出按 LRU 回收页面，状态保留）。
 SESSION_SCOPING_BY_UA = env_bool("SESSION_SCOPING_BY_UA", True)
 # 当请求头与 user 字段都缺失时，是否允许**按工作目录自动分桶**。
 # 动机：同一个客户端在两个目录里各跑一个任务（例如两个 Pi）时 User-Agent 完全相同，

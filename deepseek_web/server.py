@@ -5,12 +5,13 @@ import hashlib
 import re
 import traceback
 from contextlib import asynccontextmanager
-from typing import Any, List, Optional, Tuple
+from typing import Annotated, Any
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from . import bridge_commands, config
+from . import bridge_commands, config, tasks
+from . import models as models_mod
 from .driver import (
     DEFAULT_SESSION_KEY,
     DeepSeekBusyError,
@@ -18,7 +19,6 @@ from .driver import (
     DeepSeekTimeoutError,
     DeepSeekWebDriver,
 )
-from . import models as models_mod
 from .models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -30,7 +30,6 @@ from .models import (
 )
 from .prompting import build_prompt, estimate_tokens
 from .responses import ResponsesRequest, handle_responses
-from . import tasks
 from .streaming import _stream_bridge_reply, _stream_chat_completion
 from .toolcalls import _tool_names, parse_tool_calls, to_tool_call_models
 
@@ -65,7 +64,7 @@ def _error_response(status_code: int, message: str, err_type: str):
 app = FastAPI(title="DeepSeek Web-to-API Bridge", lifespan=lifespan)
 
 
-def _client_from_ua(ua: str) -> Optional[str]:
+def _client_from_ua(ua: str) -> str | None:
     """从 User-Agent 中提取客户端标识，用于自动按客户端分桶。
 
     不同的 AI 编程助手（Cline、Cursor、Aider 等）会发送各自独有的 User-Agent，
@@ -81,16 +80,16 @@ def _client_from_ua(ua: str) -> Optional[str]:
     ua_lower = ua.lower()
     # 常见 AI 编程助手 / SDK 的关键词。用**词边界**匹配，避免子串误命中
     # （例如 "continue" 出现在别的 UA 里、"openai" 被 python SDK 泛化命中）。
-    _KNOWN_CLIENTS = (
+    known_clients = (
         "roo-code", "windsurf", "cline", "cursor", "aider",
         "copilot", "continue", "antigravity", "openai", "anthropic",
     )
-    for name in _KNOWN_CLIENTS:
+    for name in known_clients:
         if re.search(rf"(?:^|[^a-z0-9]){re.escape(name)}(?:[/\s;]|$)", ua_lower):
             return f"ua:{name}"
     # 通用 fallback：取 UA 第一个 token 的 product 部分
     # e.g. "python-httpx/0.27.0" → "ua:python-httpx"
-    first_token = ua.split()[0] if ua else ""
+    first_token = ua.split(maxsplit=1)[0] if ua else ""
     if "/" in first_token:
         product = first_token.split("/", 1)[0].strip().lower()
         # 只接受形如合法产品名的短串，避免把奇怪 UA 变成非法桶名
@@ -104,7 +103,7 @@ def _content_to_prompt_text(content: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        pieces: List[str] = []
+        pieces: list[str] = []
         for part in content:
             if isinstance(part, str):
                 pieces.append(part)
@@ -119,7 +118,7 @@ def _content_to_prompt_text(content: Any) -> str:
     return ""
 
 
-def _cwd_candidate_texts(request: Any) -> List[str]:
+def _cwd_candidate_texts(request: Any) -> list[str]:
     """收集可能写着工作目录的提示词文本（全部 system/developer + 首条 user）。
 
     Pi 的 system prompt 带 ``<cwd>…</cwd>`` 段；Codex 在 ``instructions`` 里带环境
@@ -127,7 +126,7 @@ def _cwd_candidate_texts(request: Any) -> List[str]:
     消息的 ``<environment_details>`` 里。只取这些位置，避免把用户正文里的路径
     误当成工作目录（那会让会话桶跟着正文内容漂移）。
     """
-    texts: List[str] = []
+    texts: list[str] = []
     instructions = getattr(request, "instructions", None)
     if isinstance(instructions, str) and instructions.strip():
         texts.append(instructions)
@@ -167,7 +166,7 @@ def _cwd_candidate_texts(request: Any) -> List[str]:
 
 
 @functools.lru_cache(maxsize=16)
-def _compiled_cwd_patterns(patterns: Tuple[str, ...]) -> Tuple[re.Pattern, ...]:
+def _compiled_cwd_patterns(patterns: tuple[str, ...]) -> tuple[re.Pattern, ...]:
     """编译 SESSION_CWD_PATTERNS（按其取值缓存）。非法正则跳过，不拖垮请求。"""
     compiled = []
     for pattern in patterns:
@@ -178,7 +177,7 @@ def _compiled_cwd_patterns(patterns: Tuple[str, ...]) -> Tuple[re.Pattern, ...]:
     return tuple(compiled)
 
 
-def _extract_cwd(text: str) -> Optional[str]:
+def _extract_cwd(text: str) -> str | None:
     """从提示词文本里提取工作目录（取第 1 条命中的捕获组）。"""
     for pattern in _compiled_cwd_patterns(tuple(config.SESSION_CWD_PATTERNS)):
         match = pattern.search(text)
@@ -191,7 +190,7 @@ def _extract_cwd(text: str) -> Optional[str]:
     return None
 
 
-def _bucket_from_cwd(path: str) -> Optional[str]:
+def _bucket_from_cwd(path: str) -> str | None:
     """工作目录 -> 稳定、短、可读的会话桶名：``cwd:<目录名>-<路径哈希8位>``。
 
     带哈希是为了「不同路径、同名目录」也不会共用会话；同一目录永远得到同一个键，
@@ -204,11 +203,11 @@ def _bucket_from_cwd(path: str) -> Optional[str]:
     if not name or name in (".", ".."):
         return None
     safe_name = re.sub(r"[^\w.-]", "_", name)[:32] or "dir"
-    digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:8]
+    digest = hashlib.sha1(normalized.encode("utf-8"), usedforsecurity=False).hexdigest()[:8]
     return f"cwd:{safe_name}-{digest}"
 
 
-def _session_key_from_cwd(request: Any) -> Optional[str]:
+def _session_key_from_cwd(request: Any) -> str | None:
     """按提示词里的工作目录派生会话桶（找不到返回 None）。"""
     for text in _cwd_candidate_texts(request):
         path = _extract_cwd(text)
@@ -222,9 +221,9 @@ def _session_key_from_cwd(request: Any) -> Optional[str]:
 
 def _session_key(
     request: ChatCompletionRequest,
-    header_value: Optional[str],
-    user_agent: Optional[str] = None,
-) -> Optional[str]:
+    header_value: str | None,
+    user_agent: str | None = None,
+) -> str | None:
     """确定本次请求属于哪个会话桶（按任务隔离会话）。
 
     优先级（高 → 低）：
@@ -281,7 +280,7 @@ async def healthz():
 
 
 @app.post("/session/reset", include_in_schema=False)
-async def reset_session(session: Optional[str] = None):
+async def reset_session(session: str | None = None):
     """手动逃生口：让指定会话桶的下一轮开新会话（历史会用“播种”重放，不丢上下文）。
 
     ``session`` 省略时重置默认桶；也可用 ``DEEPSEEK_NEW_SESSION=true`` 在启动时重置。
@@ -328,8 +327,10 @@ async def list_models():
 @app.post("/v1/responses")
 async def responses(
     request: ResponsesRequest,
-    x_deepseek_session: Optional[str] = Header(None, alias=config.SESSION_KEY_HEADER),
-    user_agent: Optional[str] = Header(None, alias="User-Agent"),
+    x_deepseek_session: Annotated[
+        str | None, Header(alias=config.SESSION_KEY_HEADER)
+    ] = None,
+    user_agent: Annotated[str | None, Header(alias="User-Agent")] = None,
 ):
     """OpenAI Responses API（Codex CLI 专用）。
 
@@ -337,7 +338,9 @@ async def responses(
     ``deepseek_web.responses``。此路由绝不改动 chat 路径的行为。
     """
     if not config.ENABLE_RESPONSES_API:
-        raise HTTPException(status_code=404, detail="Responses API 未启用（ENABLE_RESPONSES_API=false）")
+        raise HTTPException(
+            status_code=404, detail="Responses API 未启用（ENABLE_RESPONSES_API=false）"
+        )
     session_key = _session_key(request, x_deepseek_session, user_agent)
     if config.DEBUG:
         print(f"[debug] responses session_key={session_key!r}")
@@ -364,21 +367,24 @@ async def debug_dom():
 
     nodes = await driver.page.query_selector_all(config.RESPONSE_SELECTORS)
     last_text = await nodes[-1].inner_text() if nodes else ""
-    node_summaries: List[dict] = []
+    node_summaries: list[dict] = []
     for index, node in enumerate(nodes):
         try:
             node_text = await node.inner_text()
-        except Exception:
+        except Exception:  # noqa: BLE001 诊断端点：单个节点读失败只丢该节点的文本，
+            # 不能因此让整个 /diagnostics/dom 挂掉；也不 import playwright 异常类
             node_text = ""
         try:
             cls = await node.get_attribute("class") or ""
-        except Exception:
+        except Exception:  # noqa: BLE001 同上
             cls = ""
         node_summaries.append({
             "index": index,
             "class": cls,
             "text_length": len(node_text),
-            "sha1": hashlib.sha1(node_text.encode("utf-8")).hexdigest(),
+            "sha1": hashlib.sha1(
+                node_text.encode("utf-8"), usedforsecurity=False
+            ).hexdigest(),
         })
     # 注意：**不回显正文**。判断“结束判定是否生效”只需要长度与 sha1
     # （生成中变化、结束后稳定），所以这里不再输出 head / tail。
@@ -388,7 +394,9 @@ async def debug_dom():
         "nodes": node_summaries,
         "last_node": {
             "text_length": len(last_text),
-            "sha1": hashlib.sha1(last_text.encode("utf-8")).hexdigest(),
+            "sha1": hashlib.sha1(
+                last_text.encode("utf-8"), usedforsecurity=False
+            ).hexdigest(),
         },
         "generating": await driver._page_is_generating(),
         "stop_candidates": await driver.debug_stop_candidates(),
@@ -398,8 +406,10 @@ async def debug_dom():
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def chat_completions(
     request: ChatCompletionRequest,
-    x_deepseek_session: Optional[str] = Header(None, alias=config.SESSION_KEY_HEADER),
-    user_agent: Optional[str] = Header(None, alias="User-Agent"),
+    x_deepseek_session: Annotated[
+        str | None, Header(alias=config.SESSION_KEY_HEADER)
+    ] = None,
+    user_agent: Annotated[str | None, Header(alias="User-Agent")] = None,
 ):
     if not request.messages:
         return _error_response(400, "messages 不能为空", "invalid_request_error")
@@ -477,7 +487,7 @@ async def chat_completions(
 
     # ---------- 非流式分支 ----------
     try:
-        reply_content, code_blocks = await driver.send_chat(
+        reply_content, _code_blocks = await driver.send_chat(
             prompt, seeded_prompt=seeded_prompt, key=session_key
         )
     except DeepSeekContextLimitError as exc:
@@ -513,7 +523,10 @@ async def chat_completions(
             model=request.model,
             choices=[Choice(
                 index=0,
-                message=ChoiceMessage(role="assistant", content=None, tool_calls=to_tool_call_models(tool_calls)),
+                message=ChoiceMessage(
+                    role="assistant", content=None,
+                    tool_calls=to_tool_call_models(tool_calls),
+                ),
                 finish_reason="tool_calls",
             )],
             usage=Usage(

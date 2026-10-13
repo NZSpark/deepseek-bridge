@@ -1,6 +1,6 @@
 """把客户端的消息数组转换成网页输入框里的一整段文本，以及若干纯文本工具函数。"""
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .models import ChatMessage
 from .toolcalls import format_tool_call_emphasis, format_tools_instruction
@@ -19,7 +19,7 @@ def _content_to_text(content: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        pieces: List[str] = []
+        pieces: list[str] = []
         for part in content:
             if isinstance(part, str):
                 pieces.append(part)
@@ -48,7 +48,7 @@ def estimate_tokens(text: str) -> int:
     return max(1, cjk + other // 4)
 
 
-def _delta_piece(streamed: str, current: str) -> tuple[Optional[str], str]:
+def _delta_piece(streamed: str, current: str) -> tuple[str | None, str]:
     """计算 ``current`` 相对「已经发给客户端的内容」真正新增的部分。
 
     网页版在生成中可能重排 / 替换回复节点，导致 ``current`` 不再以之前的内容为前缀。
@@ -86,7 +86,7 @@ def _render_message(message: ChatMessage) -> str:
     return content
 
 
-def _last_assistant_index(messages: List[ChatMessage]) -> int:
+def _last_assistant_index(messages: list[ChatMessage]) -> int:
     last = -1
     for index, message in enumerate(messages):
         if message.role == "assistant":
@@ -94,7 +94,7 @@ def _last_assistant_index(messages: List[ChatMessage]) -> int:
     return last
 
 
-def _run_messages(messages: List[ChatMessage]) -> List[ChatMessage]:
+def _run_messages(messages: list[ChatMessage]) -> list[ChatMessage]:
     """取出“最后一条 assistant 之后”的新增消息。"""
     last_assistant = _last_assistant_index(messages)
     delta = messages[last_assistant + 1:] if last_assistant >= 0 else messages
@@ -104,7 +104,7 @@ def _run_messages(messages: List[ChatMessage]) -> List[ChatMessage]:
     return delta
 
 
-def _seed_messages(messages: List[ChatMessage], max_chars: int):
+def _seed_messages(messages: list[ChatMessage], max_chars: int):
     """为新会话准备“播种”内容：尽量带上完整上下文，超出预算时保留最近的。
 
     网页会话一旦轮转（新开会话），后端的上下文就清空了。此时如果还只发增量，
@@ -115,7 +115,7 @@ def _seed_messages(messages: List[ChatMessage], max_chars: int):
     systems = [m for m in messages if m.role == "system"]
     rest = [m for m in messages if m.role != "system"]
 
-    kept: List[ChatMessage] = []
+    kept: list[ChatMessage] = []
     used = sum(len(_content_to_text(m.content)) for m in systems)
     truncated = False
     for message in reversed(rest):
@@ -129,13 +129,14 @@ def _seed_messages(messages: List[ChatMessage], max_chars: int):
     return systems, kept, truncated
 
 
-def build_prompt(
-    messages: List[ChatMessage],
-    tools: Optional[List[Dict[str, Any]]] = None,
-    tool_choice: Optional[Any] = None,
+def build_prompt(  # noqa: PLR0913 扁平签名是刻意的：prompt 的全部输入，拆成 dataclass 只会让 9 个调用点更绕
+    messages: list[ChatMessage],
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: Any | None = None,
+    *,
     seed: bool = False,
-    seed_max_chars: Optional[int] = None,
-    task_block: Optional[str] = None,
+    seed_max_chars: int | None = None,
+    task_block: str | None = None,
 ) -> str:
     """把客户端发来的完整 OpenAI 消息数组，转换成要发给网页输入框的文本。
 
@@ -148,8 +149,10 @@ def build_prompt(
       ``seed_max_chars`` 的尾部截断逻辑丢掉——这是“轮转不丢任务”的关键。
     """
     if seed:
-        systems, kept, truncated = _seed_messages(messages, seed_max_chars or DEFAULT_SEED_MAX_CHARS)
-        parts: List[str] = [
+        systems, kept, truncated = _seed_messages(
+            messages, seed_max_chars or DEFAULT_SEED_MAX_CHARS
+        )
+        parts: list[str] = [
             "[上下文重建] 这是一个新会话。以下是本次任务此前的对话记录，请据此继续，不要从头重做。"
         ]
         if task_block:

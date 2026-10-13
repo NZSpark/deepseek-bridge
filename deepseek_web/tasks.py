@@ -13,11 +13,12 @@
 播种内容的最前面，确保目标始终传达给新会话。
 """
 
+import contextlib
 import json
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 from . import config
 from .models import ChatMessage
@@ -40,7 +41,7 @@ def _file(bucket: str) -> Path:
     return _dir() / f"{safe}.json"
 
 
-def _goal_from_messages(messages: List[ChatMessage]) -> str:
+def _goal_from_messages(messages: list[ChatMessage]) -> str:
     """取任务目标：第一条**真正的** user 消息（跳过 system 与环境包装块）。
 
 注意：Codex / 部分 Agent 会在每轮最前面自动注入 ``<environment_context>`` 之类的
@@ -96,11 +97,11 @@ def _is_meta_prompt(text: str) -> bool:
     return bool(_META_PROMPT_RE.search((text or "")[:800]))
 
 
-def _recent_texts(messages: List[ChatMessage]) -> List[Dict[str, str]]:
+def _recent_texts(messages: list[ChatMessage]) -> list[dict[str, str]]:
     """最近 N 条消息（role + 文本），滚动保留。"""
     keep = max(0, config.TASK_KEEP_MESSAGES)
     picked = [m for m in messages if m.role != "system"][-keep:] if keep else []
-    out: List[Dict[str, str]] = []
+    out: list[dict[str, str]] = []
     for message in picked:
         text = _content_to_text(message.content).strip()
         if text and not _is_environment_wrapper(text) and not _is_meta_prompt(text):
@@ -108,11 +109,11 @@ def _recent_texts(messages: List[ChatMessage]) -> List[Dict[str, str]]:
     return out
 
 
-def load(bucket: str) -> Dict[str, Any]:
+def load(bucket: str) -> dict[str, Any]:
     try:
         raw = _file(bucket).read_text(encoding="utf-8")
         data = json.loads(raw)
-    except Exception:
+    except (OSError, json.JSONDecodeError):
         return {}
     if not isinstance(data, dict):
         return {}
@@ -124,7 +125,7 @@ def load(bucket: str) -> Dict[str, Any]:
     return data
 
 
-def record(bucket: str, messages: List[ChatMessage]) -> None:
+def record(bucket: str, messages: list[ChatMessage]) -> None:
     """每轮把当前 messages 快照写入任务文件（goal 只首次写入，之后保留）。"""
     if not config.TASK_SNAPSHOT_ENABLED:
         return
@@ -142,13 +143,11 @@ def record(bucket: str, messages: List[ChatMessage]) -> None:
         "turns": int(data.get("turns") or 0) + 1,
         "updated_at": int(time.time()),
     }
-    try:
+    with contextlib.suppress(OSError):
         _dir().mkdir(parents=True, exist_ok=True)
         _file(bucket).write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-    except Exception:
-        pass
 
 
 def resume_block(bucket: str) -> str:

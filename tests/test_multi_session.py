@@ -8,7 +8,6 @@
 import asyncio
 import json
 import sys
-import tempfile
 import time
 import unittest
 import unittest.mock
@@ -16,9 +15,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import deepseek_api_server as srv  # noqa: E402
-from deepseek_web import config  # noqa: E402
-from deepseek_web.driver import DEFAULT_SESSION_KEY, DeepSeekBusyError  # noqa: E402
+import deepseek_api_server as srv
+from deepseek_web import config
+from deepseek_web.driver import DEFAULT_SESSION_KEY, DeepSeekBusyError
 
 URL_A = "https://chat.deepseek.com/a/chat/s/aaaaaaaa-1111-2222-3333-444444444444"
 URL_A2 = "https://chat.deepseek.com/a/chat/s/bbbbbbbb-5555-6666-7777-888888888888"
@@ -281,9 +280,11 @@ class BucketEvictionTests(BucketTestCase):
 
     def test_zero_limit_is_rejected_with_actionable_message(self):
         driver = self.driver_for()
-        with unittest.mock.patch.object(config, "MAX_SESSION_BUCKETS", 0):
-            with self.assertRaises(RuntimeError) as ctx:
-                asyncio.run(driver._ensure_page("task-a"))
+        with (
+            unittest.mock.patch.object(config, "MAX_SESSION_BUCKETS", 0),
+            self.assertRaises(RuntimeError) as ctx,
+        ):
+            asyncio.run(driver._ensure_page("task-a"))
         message = str(ctx.exception)
         self.assertIn("MAX_SESSION_BUCKETS=0", message)
         self.assertIn("SESSION_SCOPING=false", message)

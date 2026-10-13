@@ -29,8 +29,9 @@
 
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, List, Optional, Sequence
+from typing import Any
 from urllib.parse import urlsplit
 
 from . import config, models
@@ -111,7 +112,7 @@ REGISTRY: tuple = (
 # ==================== 解析 ====================
 
 
-def parse_command(text: str) -> Optional[BridgeCommand]:
+def parse_command(text: str) -> BridgeCommand | None:
     """整条消息是否是一条 ``/bridge`` 命令；不是则返回 ``None``（照常发给网页版）。
 
     只有「整条消息就是这一行」才算命令：混在正文里、出现在多行文本里、或出现在历史
@@ -160,7 +161,7 @@ def _invalid(reason: str) -> BridgeCommand:
     return BridgeCommand("invalid", reason=f"{reason}\n{_USAGE}")
 
 
-def _parse_session(rest: List[str]) -> BridgeCommand:
+def _parse_session(rest: list[str]) -> BridgeCommand:
     if not rest:
         return BridgeCommand("session", subaction="status")
     sub, args = rest[0].lower(), rest[1:]
@@ -173,7 +174,7 @@ def _parse_session(rest: List[str]) -> BridgeCommand:
         return BridgeCommand("session", subaction=sub)
     # session link <URL> [--seed]：选项个数与地址都单独校验，不做猜测式执行
     seed = False
-    positional: List[str] = []
+    positional: list[str] = []
     for token in args:
         if token.lower() == SEED_FLAG:
             seed = True
@@ -188,7 +189,7 @@ def _parse_session(rest: List[str]) -> BridgeCommand:
     return BridgeCommand("session", subaction="link", target=positional[0], seed=seed)
 
 
-def latest_user_text(messages: Optional[Sequence[Any]]) -> Optional[str]:
+def latest_user_text(messages: Sequence[Any] | None) -> str | None:
     """最后一条消息的文本，仅当它是 ``user`` 消息时返回（否则 ``None``）。
 
     只看最后一条：历史里的旧命令是**已经执行过**的会话内容，不能被重放执行——
@@ -205,7 +206,7 @@ def latest_user_text(messages: Optional[Sequence[Any]]) -> Optional[str]:
     return _content_to_text(content)
 
 
-def is_command(messages: Optional[Sequence[Any]]) -> bool:
+def is_command(messages: Sequence[Any] | None) -> bool:
     """这批消息的最后一条是否会由桥自己应答（``/bridge ...``）。
 
     路由层用它把「桥内命令」从「需要浏览器才能处理的普通提问」里分出来：浏览器尚未
@@ -218,7 +219,7 @@ def is_command(messages: Optional[Sequence[Any]]) -> bool:
 # ==================== 会话地址校验 ====================
 
 
-def normalize_session_url(raw: str) -> Optional[str]:
+def normalize_session_url(raw: str) -> str | None:
     """把用户给出的会话地址（或裸会话 ID）归一化成合法会话 URL；不合法返回 ``None``。
 
     只接受：``https`` + 主机在 ``config.LINK_ALLOWED_HOSTS`` 里 + 路径是
@@ -248,8 +249,8 @@ def normalize_session_url(raw: str) -> Optional[str]:
 
 
 async def handle_command(
-    messages: Optional[Sequence[Any]], driver, session_key: Optional[str] = None
-) -> Optional[str]:
+    messages: Sequence[Any] | None, driver, session_key: str | None = None
+) -> str | None:
     """识别并执行聊天命令，返回桥自己给出的应答；不是命令时返回 ``None``。
 
     调用方拿到应答后直接回给客户端，**不会**把这条消息发给网页版（因此命令在页面
@@ -265,7 +266,7 @@ async def handle_command(
     bucket = session_key or DEFAULT_SESSION_KEY
     try:
         return await _execute(command, driver, bucket)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         # 失败要可解释，但不把内部堆栈 / 敏感信息发给客户端（细节留在日志里）
         logger.warning("[命令] 执行 %s 失败：%r", BRIDGE_COMMAND, exc, exc_info=True)
         return f"[Bridge] 命令未执行：内部错误（{type(exc).__name__}）。请查看服务日志。"
@@ -368,7 +369,10 @@ def _status_reply(driver, bucket: str) -> str:
     lines.append(f"  当前桶页面：{_page_line(stats, page_ready)}")
     lines.append(f"  会话绑定：{stats.get('linked_url') or '未绑定'}")
     lines.append(f"  网页会话：{_history_line(stats)}")
-    lines.append(f"  轮数：{int(stats.get('turns') or 0)}；估算 tokens：{int(stats.get('est_tokens') or 0)}")
+    lines.append(
+        f"  轮数：{int(stats.get('turns') or 0)}；"
+        f"估算 tokens：{int(stats.get('est_tokens') or 0)}"
+    )
     if not page_ready:
         lines.append(
             "  下一步：检查登录状态或查看 GET /healthz；浏览器不可用时只读命令仍可用。"
@@ -416,7 +420,10 @@ def _session_status_reply(driver, bucket: str) -> str:
     lines = [f"[Bridge] 会话桶 {bucket} 的会话状态："]
     lines.append(f"  会话绑定：{stats.get('linked_url') or '未绑定'}")
     lines.append(f"  网页会话：{_history_line(stats)}")
-    lines.append(f"  轮数：{int(stats.get('turns') or 0)}；估算 tokens：{int(stats.get('est_tokens') or 0)}")
+    lines.append(
+        f"  轮数：{int(stats.get('turns') or 0)}；"
+        f"估算 tokens：{int(stats.get('est_tokens') or 0)}"
+    )
     if stats.get("cap_hit"):
         lines.append("  上次生成：因上下文长度上限中断（下一轮会轮转到新会话）")
     last_error = stats.get("last_error")
@@ -477,10 +484,15 @@ async def _session_link_reply(command: BridgeCommand, driver, bucket: str) -> st
     logger.info("[命令] key=%s 已按 %s session link 绑定到 %s。", bucket, BRIDGE_COMMAND, url)
     lines = [f"[Bridge] 已把会话桶 {bucket} 绑定到：{url}"]
     if command.seed:
-        lines.append("  下一轮会把客户端传来的完整历史**播种**进这条会话（历史在网页端会重复一遍）。")
+        lines.append(
+            "  下一轮会把客户端传来的完整历史**播种**进这条会话（历史在网页端会重复一遍）。"
+        )
     else:
         lines.append("  按「该会话里已有此前上下文」处理，之后只发增量。")
-        lines.append(f"  若那条会话其实是空的，请改用 `{BRIDGE_COMMAND} session link <URL> {SEED_FLAG}`。")
+        lines.append(
+            f"  若那条会话其实是空的，请改用 "
+            f"`{BRIDGE_COMMAND} session link <URL> {SEED_FLAG}`。"
+        )
     lines.append("  影响范围：只影响这个会话桶；页面丢失重建 / 服务重启后仍会回到这条会话。")
     lines.append(f"  解除绑定：`{BRIDGE_COMMAND} session unlink`。")
     return "\n".join(lines)

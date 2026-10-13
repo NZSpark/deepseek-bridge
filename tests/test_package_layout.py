@@ -12,17 +12,18 @@
 import sys
 import unittest
 from pathlib import Path
+from typing import ClassVar
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import deepseek_api_server as entry  # noqa: E402
-from deepseek_web import config  # noqa: E402
+import deepseek_api_server as entry
+from deepseek_web import config
 
 
 class EntryPointCompatTests(unittest.TestCase):
     """老代码 `from deepseek_api_server import X` 不能失效。"""
 
-    HISTORICAL_NAMES = [
+    HISTORICAL_NAMES: ClassVar[list[str]] = [
         # 数据模型
         "FunctionCall", "ToolCall", "ChatMessage", "ChatCompletionRequest",
         "ChoiceMessage", "Choice", "Usage", "ChatCompletionResponse",
@@ -41,7 +42,7 @@ class EntryPointCompatTests(unittest.TestCase):
         self.assertEqual(missing, [])
 
     # 会话分桶与手动重置引入的新公开名字
-    NEW_NAMES = [
+    NEW_NAMES: ClassVar[list[str]] = [
         "DEFAULT_SESSION_KEY",
         "SessionState",
         "DeepSeekContextLimitError",
@@ -119,7 +120,9 @@ class AppTests(unittest.TestCase):
         config_src = Path(config.__file__).read_text(encoding="utf-8")
         used = set(re.findall(r'env_(?:str|int|float|bool)\(\s*"([A-Z_]+)"', config_src))
         example = Path(__file__).resolve().parent.parent / ".env.example"
-        declared = set(re.findall(r"^([A-Z_]+)=", example.read_text(encoding="utf-8"), re.M))
+        declared = set(
+            re.findall(r"^([A-Z_]+)=", example.read_text(encoding="utf-8"), re.MULTILINE)
+        )
         self.assertEqual(sorted(used - declared), [], ".env.example 缺少这些配置项")
 
     def test_cap_notice_patterns_are_valid_regex(self):

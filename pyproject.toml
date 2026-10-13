@@ -10,3 +10,88 @@ dependencies = [
     "ruff>=0.17.0",
     "uvicorn>=0.54.0",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+# tests/e2e/ 里的真机（联网 + 复用登录态）用例默认全部 skip，需 DEEPSEEK_E2E=1 才运行：
+# 判定矩阵与前置条件见 doc/e2e_test_design.md。
+markers = [
+    "e2e: 真机 / 联网 / 需要已登录 profile 的用例（显式开关才跑）",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+# 全规则集。注意：ruff 0.17 不带配置时**本来就默认启用 400+ 条**，跨版本会漂，
+# 所以这里把口径显式写死：ALL 开满，再用 ignore 逐条豁免（豁免必须写理由，不得静默关掉）。
+# preview 显式关掉：未定型的规则不进基线，避免升级时无声换规则。
+select = ["ALL"]
+preview = false
+ignore = [
+    # —— 中文仓库的排版：全角标点 / 中文引号是有意的，不是「易混 Unicode 字符」——
+    "RUF001",
+    "RUF002",
+    "RUF003",
+
+    # —— 类型注解与 docstring 是独立议题（另有排期）——
+    # 本项目说明文字以中文段落为主，全量补 D/ANN 会产生上千条纯格式改动，淹没真检查项。
+    "D",
+    "ANN",
+
+    # —— 测试框架：沿用 unittest.TestCase（与同族项目一致）——
+    # PT009/PT027 要求改写成裸 assert，属于测试框架迁移，不在本轮。
+    "PT009",
+    "PT027",
+
+    # —— 有意访问私有成员：回归用例要直接构造/断言内部状态 ——
+    "SLF001",
+
+    # —— 回调 / hook 签名必须与被调用方匹配，删「未用参数」会破坏契约 ——
+    "ARG001",
+    "ARG002",
+    "ARG005",
+
+    # —— 与 formatter 冲突，且本仓库不引入 formatter ——
+    "COM812",
+    "ISC001",
+
+    # —— 布尔位置参数改造会改公开调用签名，单独排期 ——
+    "FBT",
+
+    # —— 异常消息包装（EM/TRY003）与 try/else（TRY300）属于独立重构 ——
+    "EM",
+    "TRY003",
+    "TRY300",
+
+    # —— 复杂度阈值（C901 / PLR091x）需要真正的重构，单独排期 ——
+    "C901",
+    "PLR0911",
+    "PLR0912",
+    "PLR0915",
+
+    # —— 惰性 import 是有意设计（driver.py 先占位、Playwright 后 import）——
+    "PLC0415",
+
+    # —— 超时参数名沿用调用方约定（asyncio.wait_for 风格）——
+    "ASYNC109",
+
+    # —— typing-only import（TC001-003）与 UP 现代化一起单独排期 ——
+    "TC001",
+    "TC002",
+    "TC003",
+
+    # —— CLI / 脚本的 print 是有意输出 ——
+    "T201",
+
+    # —— 无版权头传统 ——
+    "CPY001",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 真机 E2E 的那个 HTTP 客户端：目标地址来自 DEEPSEEK_E2E_BASE_URL（运行期才知道），
+# 而 S310 关心的是「scheme 可能不是 http(s)」——这个前置条件在 open_url() 里已经**真的做出来**
+# （非 http/https 直接拒绝），所以这里按文件豁免一次，而不是散落 4 处行内 noqa。
+"tests/e2e/test_bridge_contract.py" = ["S310"]

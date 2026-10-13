@@ -14,9 +14,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import deepseek_api_server as srv  # noqa: E402
-from deepseek_web import config  # noqa: E402
-from deepseek_web.driver import DeepSeekContextLimitError, DeepSeekTimeoutError  # noqa: E402
+import deepseek_api_server as srv
+from deepseek_web import config
+from deepseek_web.driver import DeepSeekContextLimitError, DeepSeekTimeoutError
 
 
 class FakeInput:
@@ -49,7 +49,14 @@ class FakeNode:
 class FakePage:
     """query_selector_all 第一次调用是 baseline，之后按脚本返回。"""
 
-    def __init__(self, baseline=None, script=None, generating=(False,), url="https://chat.deepseek.com/", page_text=""):
+    def __init__(
+        self,
+        baseline=None,
+        script=None,
+        generating=(False,),
+        url="https://chat.deepseek.com/",
+        page_text="",
+    ):
         self.baseline = list(baseline or [])
         self.script = list(script or [[None]])
         self.generating = list(generating)
@@ -209,7 +216,9 @@ class CapDetectionTests(SessionTestCase):
 
     def test_context_limit_raises_specific_error(self):
         # 页面没有新回复，且出现“到顶”提示
-        page = FakePage(baseline=["旧"], script=[[None]], page_text="已达到长度限制，请开始新的聊天。")
+        page = FakePage(
+            baseline=["旧"], script=[[None]], page_text="已达到长度限制，请开始新的聊天。"
+        )
         driver = self.driver_for(page)
         driver.session_has_history = True
         with self.assertRaises(DeepSeekContextLimitError):
@@ -258,7 +267,9 @@ class SessionStateTests(SessionTestCase):
         self.assertEqual(json.loads(self._tmp.read_text(encoding="utf-8"))["url"], url)
 
     def test_clear_url_drops_previous_session(self):
-        self._tmp.write_text(json.dumps({"url": "https://chat.deepseek.com/a/chat/s/x"}), encoding="utf-8")
+        self._tmp.write_text(
+            json.dumps({"url": "https://chat.deepseek.com/a/chat/s/x"}), encoding="utf-8"
+        )
         driver = self.driver_for(FakePage(url="https://chat.deepseek.com/"))
         driver._save_session_state(clear_url=True)
         self.assertIsNone(json.loads(self._tmp.read_text(encoding="utf-8"))["url"])
@@ -488,7 +499,7 @@ class StreamingErrorTypeTests(SessionTestCase):
                 return "答案", []
 
         out = "".join(self._drain(_stream_chat_completion(self._request(), "p", OkDriver(), "s")))
-        self.assertIn("\"finish_reason\": \"stop\"", out)
+        self.assertIn('"finish_reason": "stop"', out)
         self.assertIn("data: [DONE]", out)
 
 

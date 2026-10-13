@@ -5,10 +5,11 @@
 ``_page_for`` / ``_wait_ready`` / ``_current_session_url`` / ``_last_prompts``。
 """
 
+import contextlib
 import json
 import time
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from . import config
 from .errors import DEFAULT_SESSION_KEY, HOME_URL
@@ -26,22 +27,22 @@ class SessionState:
       历史再播种一遍（落盘，重启 / 并发都不会丢，发送成功后清除）；
     """
 
-    url: Optional[str] = None
-    linked_url: Optional[str] = None
+    url: str | None = None
+    linked_url: str | None = None
     has_history: bool = False
     turns: int = 0
     est_tokens: int = 0
     cap_hit: bool = False
     pending_rotation: bool = False
     pending_reseed: bool = False
-    last_error: Optional[str] = None
+    last_error: str | None = None
     updated_at: int = 0
 
-    def to_payload(self) -> Dict[str, Any]:
+    def to_payload(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
-    def from_payload(cls, payload: Dict[str, Any]) -> "SessionState":
+    def from_payload(cls, payload: dict[str, Any]) -> SessionState:
         state = cls()
         if not isinstance(payload, dict):
             return state
@@ -67,7 +68,7 @@ class SessionState:
 class SessionStoreMixin:
     """会话桶状态的读写、属性代理与轮转 / 恢复。"""
 
-    def _state(self, key: Optional[str] = None) -> SessionState:
+    def _state(self, key: str | None = None) -> SessionState:
         """取出某个会话桶的状态；首次访问时从磁盘恢复。"""
         bucket = key or DEFAULT_SESSION_KEY
         state = self._sessions.get(bucket)
@@ -76,7 +77,7 @@ class SessionStoreMixin:
             self._sessions[bucket] = state
         return state
 
-    def sent_prompt(self, key: Optional[str] = None) -> Optional[str]:
+    def sent_prompt(self, key: str | None = None) -> str | None:
         """某个会话桶最近一次真正发给网页版的 prompt（可能因轮转由增量改选播种版）。"""
         return self._last_prompts.get(key or DEFAULT_SESSION_KEY)
 
@@ -113,11 +114,11 @@ class SessionStoreMixin:
         self._state().cap_hit = bool(value)
 
     @property
-    def last_error(self) -> Optional[str]:
+    def last_error(self) -> str | None:
         return self._state().last_error
 
     @last_error.setter
-    def last_error(self, value: Optional[str]) -> None:
+    def last_error(self, value: str | None) -> None:
         self._state().last_error = value
 
     @property
@@ -128,34 +129,35 @@ class SessionStoreMixin:
     def _pending_rotation(self, value: bool) -> None:
         self._state().pending_rotation = bool(value)
 
-    def _current_session_url(self, key: Optional[str] = None) -> Optional[str]:
+    def _current_session_url(self, key: str | None = None) -> str | None:
         """某个会话桶的页面若处于会话中，返回其规范化会话地址。"""
         page = self._page_for(key)
         try:
             url = page.url if page else ""
-        except Exception:
+        except Exception:  # noqa: BLE001 页面随时可能被关掉；这里只求「拿不到就当空」，
+            # 且刻意不 import playwright 的异常类（测试替身 / 版本差异都要能命中，见 page_pool.py）
             url = ""
         match = config.SESSION_URL_RE.search(url or "")
         return match.group(0) if match else None
 
     # ---------- 会话状态（url + 轮数 / 体积 / 是否到顶）----------
-    def _read_state_file(self) -> Dict[str, Any]:
+    def _read_state_file(self) -> dict[str, Any]:
         """读取原始状态文件（解析失败或非 JSON 时返回空字典）。"""
         try:
             if not config.SESSION_FILE.exists():
                 return {}
             raw = config.SESSION_FILE.read_text(encoding="utf-8").strip()
-        except Exception:
+        except (OSError, UnicodeDecodeError):
             return {}
         if not raw.startswith("{"):
             return {}
         try:
             data = json.loads(raw)
-        except Exception:
+        except json.JSONDecodeError:
             return {}
         return data if isinstance(data, dict) else {}
 
-    def _load_session_state(self, key: Optional[str] = None) -> Dict[str, Any]:
+    def _load_session_state(self, key: str | None = None) -> dict[str, Any]:
         """读取某个会话桶的状态。
 
         兼容两种旧格式：文件内容是单独的会话 URL 纯文本、或顶层直接放单会话对象。
@@ -165,7 +167,7 @@ class SessionStoreMixin:
         try:
             if config.SESSION_FILE.exists():
                 raw = config.SESSION_FILE.read_text(encoding="utf-8").strip()
-        except Exception:
+        except (OSError, UnicodeDecodeError):
             return {}
         if not raw:
             return {}
@@ -182,7 +184,7 @@ class SessionStoreMixin:
         own = extra.get(bucket) if isinstance(extra, dict) else None
         return own if isinstance(own, dict) else {}
 
-    def _save_session_state(self, clear_url: bool = False, key: Optional[str] = None) -> None:
+    def _save_session_state(self, clear_url: bool = False, key: str | None = None) -> None:
         """落盘某个会话桶的状态，供后续恢复 / 轮转决策使用。
 
         文件格式（同时兼容历史格式）：
@@ -210,15 +212,13 @@ class SessionStoreMixin:
             data.setdefault("url", None)
             data["sessions"] = extra
             payload = data
-        try:
+        with contextlib.suppress(OSError):
             config.SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
             config.SESSION_FILE.write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
             )
-        except Exception:
-            pass
 
-    def _saved_session_url(self, key: Optional[str] = None) -> Optional[str]:
+    def _saved_session_url(self, key: str | None = None) -> str | None:
         """读取已保存的会话地址（若存在且合法）。
 
         ``/bridge session link`` 绑定过时优先返回绑定地址：绑定就是「这条桶必须回到
@@ -233,15 +233,15 @@ class SessionStoreMixin:
             return url
         return None
 
-    async def _remember_session(self, key: Optional[str] = None) -> None:
+    async def _remember_session(self, key: str | None = None) -> None:
         """刷新落盘的会话状态（保留此名字，兼容既有调用）。"""
         self._save_session_state(key=key)
 
-    def session_keys(self) -> List[str]:
+    def session_keys(self) -> list[str]:
         """当前在用的会话桶（至少包含默认桶）。"""
         return sorted({DEFAULT_SESSION_KEY, *self._sessions})
 
-    def needs_seed(self, key: Optional[str] = None) -> bool:
+    def needs_seed(self, key: str | None = None) -> bool:
         """某个会话桶的网页会话里没有可用上下文时，需要把完整历史播种进去。
 
         两种情形都要播种：网页会话本来就没有历史（新开 / 轮转后），或用户用
@@ -250,7 +250,7 @@ class SessionStoreMixin:
         state = self._state(key)
         return state.pending_reseed or not state.has_history
 
-    def session_stats(self, key: Optional[str] = None) -> Dict[str, Any]:
+    def session_stats(self, key: str | None = None) -> dict[str, Any]:
         """供 /healthz 与 ``/bridge`` 命令观察会话增长情况。"""
         state = self._state(key)
         return {
@@ -268,27 +268,27 @@ class SessionStoreMixin:
         }
 
     # ---------- /bridge 命令用到的按桶状态 ----------
-    def linked_session_url(self, key: Optional[str] = None) -> Optional[str]:
+    def linked_session_url(self, key: str | None = None) -> str | None:
         """该桶通过 ``/bridge session link`` 绑定的网页会话（未绑定 = None）。"""
         return self._state(key).linked_url
 
-    def reseed_session(self, key: Optional[str] = None) -> None:
+    def reseed_session(self, key: str | None = None) -> None:
         """排队「下一轮重新播种完整历史」：一次性标记，落盘后可跨重启 / 并发。"""
         bucket = key or DEFAULT_SESSION_KEY
         self._state(bucket).pending_reseed = True
         self._save_session_state(key=bucket)
         print(f"[会话] 已排队 key={bucket} 的重新播种，下一轮将重发完整历史。")
 
-    def _session_over_budget(self, key: Optional[str] = None) -> bool:
+    def _session_over_budget(self, key: str | None = None) -> bool:
         """会话体积是否已达到轮转阈值（0 表示禁用该维度）。"""
         state = self._state(key)
         if config.SESSION_MAX_TURNS and state.turns >= config.SESSION_MAX_TURNS:
             return True
-        if config.SESSION_MAX_TOKENS and state.est_tokens >= config.SESSION_MAX_TOKENS:
-            return True
-        return False
+        return bool(
+            config.SESSION_MAX_TOKENS and state.est_tokens >= config.SESSION_MAX_TOKENS
+        )
 
-    async def _start_new_session(self, key: Optional[str] = None) -> None:
+    async def _start_new_session(self, key: str | None = None) -> None:
         """轮转到新会话，并重置会话状态（调用方必须使用“播种”prompt）。"""
         page = self._page_for(key)
         if page is None:
@@ -311,7 +311,7 @@ class SessionStoreMixin:
         self._save_session_state(clear_url=True, key=key)
         print("[轮转] 已开启新的网页会话（本轮会用完整历史播种上下文）。")
 
-    def reset_session(self, key: Optional[str] = None) -> None:
+    def reset_session(self, key: str | None = None) -> None:
         """把某个会话桶标记为“下一轮开新会话”（手动逃生口）。
 
         只改状态、不碰页面：下一轮的 ``send_chat`` 会先轮转，并用“播种”

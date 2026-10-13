@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import deepseek_api_server as srv  # noqa: E402
+import deepseek_api_server as srv
 
 
 class FakeInput:
@@ -162,10 +162,12 @@ class StabilityTests(EndDetectionTestCase):
 
     def test_unchanged_content_is_not_reported_as_the_reply(self):
         page = FakePage(baseline=["旧答案"], script=[["旧答案"]])
-        with unittest.mock.patch.object(srv.config, "RESPONSE_TIMEOUT_S", 0.05):
-            with unittest.mock.patch.object(srv.config, "MAX_UPSTREAM_RETRIES", 1):
-                with self.assertRaises(srv.DeepSeekTimeoutError):
-                    self.run_chat(self.driver_for(page))
+        with (
+            unittest.mock.patch.object(srv.config, "RESPONSE_TIMEOUT_S", 0.05),
+            unittest.mock.patch.object(srv.config, "MAX_UPSTREAM_RETRIES", 1),
+            self.assertRaises(srv.DeepSeekTimeoutError),
+        ):
+            self.run_chat(self.driver_for(page))
 
     def test_timeout_returns_content_already_read(self):
         # 内容持续增长（长度与文本都在变）、永远判不到结束：
