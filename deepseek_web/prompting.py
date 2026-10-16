@@ -80,12 +80,34 @@ def _image_reference(part: dict[str, Any]) -> str | None:
     return f"{MARK_IMAGE} {url}"
 
 
-def extract_images(messages: list[Any]) -> list[ImageAttachment]:
+def _messages_since_last_assistant(messages: list[Any]) -> list[Any]:
+    """返回最后一条 assistant 消息之后的“本轮新增”消息（兼容 dict / 对象）。
+
+    没有 assistant 或没有新增时返回原列表——宁多贴一张图，也不漏掉本该粘贴的图片。
+    """
+    last = -1
+    for index, message in enumerate(messages):
+        role = message.get("role") if isinstance(message, dict) else getattr(message, "role", None)
+        if role == "assistant":
+            last = index
+    if last < 0 or last + 1 >= len(messages):
+        return messages
+    return messages[last + 1:]
+
+
+def extract_images(messages: list[Any], only_delta: bool = False) -> list[ImageAttachment]:
     """从消息里收集图片分片，供浏览器真实粘贴。
 
     base64 data URI 直接解码为字节；远程 URL 保留 ``url``（``data=None``）由调用方
-    惰性下载。顺序保留；本轮通常只关心最近的消息，数量上限由调用方裁剪。
+    惰性下载。顺序保留；数量上限由调用方裁剪。
+
+    :param only_delta: 只收集「本轮新增消息」（最后一条 assistant 之后）里的图片。
+        图片只需在它**首次出现的那一轮**粘贴一次——它已经进入网页会话上下文后，
+        后续轮次重发整段 messages 时不应再重复粘贴（历史图片保留 ``[图片]`` 文本
+        引用行即可）。默认 False（收集全部）以兼容既有调用方。
     """
+    if only_delta:
+        messages = _messages_since_last_assistant(messages)
     attachments: list[ImageAttachment] = []
     for message in messages:
         if isinstance(message, dict):

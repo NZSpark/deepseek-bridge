@@ -74,6 +74,37 @@ class ExtractImagesTests(unittest.TestCase):
         self.assertEqual([i.data for i in images], [PNG_BYTES, second])
 
 
+class ExtractImagesDeltaTests(unittest.TestCase):
+    """only_delta=True：只粘贴本轮新增消息里的图片，历史图片不重复粘贴。"""
+
+    def test_history_images_are_not_re_pasted(self):
+        # 第一轮带图，assistant 回复后，第二轮只发文本：不应再抽到任何图。
+        messages = [
+            user_msg(image_part(PNG_URI)),
+            {"role": "assistant", "content": "我看到了"},
+            {"role": "user", "content": "再描述一次"},
+        ]
+        self.assertEqual(extract_images(messages, only_delta=True), [])
+        # 全量抽取仍能拿到历史图片（兼容默认行为）
+        self.assertEqual(len(extract_images(messages)), 1)
+
+    def test_new_turn_image_is_pasted(self):
+        second = b"\x89PNG-second"
+        uri2 = "data:image/png;base64," + base64.b64encode(second).decode()
+        messages = [
+            user_msg(image_part(PNG_URI)),
+            {"role": "assistant", "content": "我看到了"},
+            user_msg(image_part(uri2)),
+        ]
+        images = extract_images(messages, only_delta=True)
+        self.assertEqual([i.data for i in images], [second])
+
+    def test_no_assistant_means_all_images(self):
+        # 首轮没有 assistant：只有一条带图 user，仍应抽到。
+        images = extract_images([user_msg(image_part(PNG_URI))], only_delta=True)
+        self.assertEqual(len(images), 1)
+
+
 class ImageReferenceTests(unittest.TestCase):
     def test_data_uri_reference_hides_full_bytes(self):
         text = srv._content_to_text([

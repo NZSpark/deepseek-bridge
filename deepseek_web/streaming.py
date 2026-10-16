@@ -29,7 +29,7 @@ def _collect_images(messages):
     """
     if not config.IMAGE_PASTE_ENABLED:
         return []
-    images = extract_images(messages)
+    images = extract_images(messages, only_delta=True)
     if len(images) > config.IMAGE_PASTE_MAX:
         images = images[: config.IMAGE_PASTE_MAX]
     return images

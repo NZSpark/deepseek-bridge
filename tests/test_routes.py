@@ -348,6 +348,24 @@ class StreamingRouteTests(RouteTestCase):
         self.drain(response)
 
 
+class ModelsEndpointTests(RouteTestCase):
+    def test_models_declare_image_input(self):
+        # 本桥支持多模态：/v1/models 必须声明可收图（图片经合成 paste 事件真实上传）。
+        payload = asyncio.run(server.list_models()).model_dump()
+        self.assertTrue(payload["data"])
+        for card in payload["data"]:
+            self.assertIn("image", card["input_modalities"], card)
+            self.assertEqual(card["output_modalities"], ["text"])
+            self.assertEqual(card["architecture"]["modality"], "text+image->text")
+
+    def test_models_keep_legacy_fields(self):
+        # 新增模态字段不能破坏既有 OpenAI 形状（id / object / owned_by）。
+        payload = asyncio.run(server.list_models()).model_dump()
+        for card in payload["data"]:
+            self.assertEqual(card["object"], "model")
+            self.assertEqual(card["owned_by"], "deepseek-web-bridge")
+
+
 class ResetRouteTests(RouteTestCase):
     def test_reset_without_argument_resets_the_default_bucket(self):
         response = asyncio.run(server.reset_session(None))

@@ -288,7 +288,7 @@ async def run_chat(
     # prompt 里的 ``[图片]`` 文本引用。开关关闭 / 无图片时为空列表。
     images = []
     if config.IMAGE_PASTE_ENABLED:
-        images = extract_images(request.messages)[: config.IMAGE_PASTE_MAX]
+        images = extract_images(request.messages, only_delta=True)[: config.IMAGE_PASTE_MAX]
     reply, blocks = await driver.send_chat(
         prompt,
         on_delta=on_delta,

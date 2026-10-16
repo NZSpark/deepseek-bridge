@@ -88,6 +88,15 @@ class ModelCard(BaseModel):
     object: str = "model"
     created: int = Field(default_factory=lambda: int(time.time()))
     owned_by: str = "deepseek-web-bridge"
+    # 多模态声明（OpenAI 兼容：
+    #   * input_modalities / output_modalities 是 OpenAI 现行字段；
+    #   * architecture.modality 是 OpenRouter 约定，Pi / OpenRouter 系客户端会读它做
+    #     "这个模型能不能收图" 的判定。两者都给，最大化兼容。
+    input_modalities: list[str] = Field(default_factory=lambda: ["text", "image"])
+    output_modalities: list[str] = Field(default_factory=lambda: ["text"])
+    architecture: dict[str, Any] = Field(
+        default_factory=lambda: {"modality": "text+image->text"}
+    )
 
 
 class ModelListResponse(BaseModel):
@@ -96,6 +105,13 @@ class ModelListResponse(BaseModel):
 
 
 # Pi 的 models.json 里引用的 id 需要与这里一致
+#: 本桥支持的多模态输入（图片经合成 paste 事件真实粘进网页输入框）。
+INPUT_MODALITIES = ["text", "image"]
+OUTPUT_MODALITIES = ["text"]
+#: OpenRouter 风格的模态串，供 architecture.modality 使用。
+MODALITY = "text+image->text"
+
+
 SUPPORTED_MODELS = [
     {"id": "deepseek-chat", "context_window": 65536},
     {"id": "deepseek-reasoner", "context_window": 65536},

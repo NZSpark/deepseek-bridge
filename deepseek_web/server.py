@@ -319,8 +319,18 @@ async def list_models():
 
     列表与 ``/bridge models`` 命令同源（``models.advertised_models``），避免两处漂移。
     """
+    # 多模态声明：本桥支持图片输入（图片经合成 paste 事件真实粘进网页输入框）。
+    # 模态字段取自 models 模块的单一真源，确保 /v1/models 与 /bridge models 一致。
     return ModelListResponse(
-        data=[ModelCard(id=m["id"]) for m in models_mod.advertised_models()]
+        data=[
+            ModelCard(
+                id=m["id"],
+                input_modalities=models_mod.INPUT_MODALITIES,
+                output_modalities=models_mod.OUTPUT_MODALITIES,
+                architecture={"modality": models_mod.MODALITY},
+            )
+            for m in models_mod.advertised_models()
+        ]
     )
 
 
@@ -490,7 +500,7 @@ async def chat_completions(
     # prompt 里的 ``[图片]`` 文本引用。开关关闭 / 无图片时为空列表。
     images = []
     if config.IMAGE_PASTE_ENABLED:
-        images = extract_images(request.messages)[: config.IMAGE_PASTE_MAX]
+        images = extract_images(request.messages, only_delta=True)[: config.IMAGE_PASTE_MAX]
     try:
         reply_content, _code_blocks = await driver.send_chat(
             prompt, seeded_prompt=seeded_prompt, key=session_key, images=images
