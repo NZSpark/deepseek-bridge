@@ -114,8 +114,9 @@ class FakeDriver:
     def cluster_stats(self):
         return {"parallel": False, "max_buckets": 8, "busy": [], "keys": ["default"]}
 
-    async def send_chat(self, prompt, on_delta=None, seeded_prompt=None, key=None):
-        self.chats.append({"prompt": prompt, "key": key})
+    async def send_chat(self, prompt, on_delta=None, seeded_prompt=None, key=None,
+                        images=None):
+        self.chats.append({"prompt": prompt, "key": key, "images": images})
         return "来自网页版的回复", []
 
 

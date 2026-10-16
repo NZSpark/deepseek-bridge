@@ -28,7 +28,7 @@ from .models import (
     ModelListResponse,
     Usage,
 )
-from .prompting import build_prompt, estimate_tokens
+from .prompting import build_prompt, estimate_tokens, extract_images
 from .responses import ResponsesRequest, handle_responses
 from .streaming import _stream_bridge_reply, _stream_chat_completion
 from .toolcalls import _tool_names, parse_tool_calls, to_tool_call_models
@@ -486,9 +486,14 @@ async def chat_completions(
         )
 
     # ---------- 非流式分支 ----------
+    # 图片：抽取真实字节（base64）或远程 URL，提交前粘贴进网页输入框；失败降级为
+    # prompt 里的 ``[图片]`` 文本引用。开关关闭 / 无图片时为空列表。
+    images = []
+    if config.IMAGE_PASTE_ENABLED:
+        images = extract_images(request.messages)[: config.IMAGE_PASTE_MAX]
     try:
         reply_content, _code_blocks = await driver.send_chat(
-            prompt, seeded_prompt=seeded_prompt, key=session_key
+            prompt, seeded_prompt=seeded_prompt, key=session_key, images=images
         )
     except DeepSeekContextLimitError as exc:
         print("\n[ERR] 网页会话已达上下文长度上限:")

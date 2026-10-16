@@ -72,7 +72,8 @@ class FakeDriver:
         self.seed_queries.append(key)
         return False
 
-    async def send_chat(self, prompt, on_delta=None, seeded_prompt=None, key=None):
+    async def send_chat(self, prompt, on_delta=None, seeded_prompt=None, key=None,
+                        images=None):
         self.chats.append({"prompt": prompt, "key": key, "seeded": seeded_prompt})
         # 模拟真实 driver：实际发出的 prompt 以 driver 记录为准（按桶读取）
         self.last_prompt = prompt
@@ -293,7 +294,8 @@ class CompletionShapeTests(RouteTestCase):
 
         # 让 driver 在 send_chat 内记录一份明显更长的“实发”prompt，
         # 模拟“调用方预估发增量、driver 实际发了播种版”的场景。
-        async def long_send_chat(prompt, on_delta=None, seeded_prompt=None, key=None):
+        async def long_send_chat(prompt, on_delta=None, seeded_prompt=None, key=None,
+                                images=None):
             self.fake.last_prompt = "上下文 " * 500
             return self.fake.reply, []
 

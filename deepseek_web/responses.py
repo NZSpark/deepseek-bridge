@@ -24,7 +24,7 @@ from .driver import (
     DeepSeekTimeoutError,
 )
 from .models import ChatCompletionRequest, ChatMessage, ToolCall
-from .prompting import build_prompt, estimate_tokens
+from .prompting import build_prompt, estimate_tokens, extract_images
 from .toolcalls import _tool_names, parse_tool_calls
 
 # ==================== 请求模型（宽松接收）====================
@@ -284,11 +284,17 @@ async def run_chat(
         raise ValueError("需要包含至少一条 user / tool 消息")
 
     wants_tools = bool(request.tools) and request.tool_choice != "none"
+    # 图片：抽取真实字节（base64）或远程 URL，提交前粘贴进网页输入框；失败降级为
+    # prompt 里的 ``[图片]`` 文本引用。开关关闭 / 无图片时为空列表。
+    images = []
+    if config.IMAGE_PASTE_ENABLED:
+        images = extract_images(request.messages)[: config.IMAGE_PASTE_MAX]
     reply, blocks = await driver.send_chat(
         prompt,
         on_delta=on_delta,
         seeded_prompt=seeded_prompt,
         key=session_key,
+        images=images,
     )
     tool_calls = parse_tool_calls(reply, _tool_names(request.tools)) if wants_tools else []
     sent_prompt = driver.sent_prompt(session_key) or prompt

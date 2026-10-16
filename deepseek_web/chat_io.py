@@ -48,6 +48,7 @@ class ChatIOMixin:
         on_delta=None,
         seeded_prompt: str | None = None,
         key: str | None = None,
+        images: list | None = None,
     ) -> tuple[str, list[dict]]:
         """发送单条消息并获取响应。
 
@@ -56,6 +57,9 @@ class ChatIOMixin:
                               未提供则退回 ``prompt``）
         :param key: 会话桶标识（按任务隔离会话）。不同 key 各自持有一条独立
                     的网页会话与页面，互不污染上下文；None 表示默认桶。
+        :param images: 待粘贴的图片（``prompting.ImageAttachment`` 列表）。在填写
+                       文本之后、提交之前以合成 paste 事件真实粘进输入框；失败只
+                       告警不阻断（prompt 里已有 ``[图片]`` 引用行兜底）。
 
         **重试阶梯**（避免在同一个已失效的会话上反复超时）：
 
@@ -119,7 +123,9 @@ class ChatIOMixin:
 
                 await self._remember_session(bucket)
                 try:
-                    return await self._send_chat_locked(active_prompt, on_delta, key=bucket)
+                    return await self._send_chat_locked(
+                        active_prompt, on_delta, key=bucket, images=images
+                    )
                 except DeepSeekContextLimitError as exc:
                     # 到顶了：下次不要再恢复同一个会话，直接轮转
                     last_error = exc
@@ -756,6 +762,77 @@ class ChatIOMixin:
         # 分块过程中节点可能被重挂载，重新定位一个可用的句柄再提交
         return await self._locate_input(page) or chat_input
 
+    # ==================== 图片粘贴（见 doc/image_upload.md）====================
+
+    async def _download_image(self, url: str) -> bytes | None:
+        """用浏览器上下文下载远程图片到字节；任何失败都返回 None。
+
+        必须走 ``self.context.request``（带 cookie / 登录态），不要用裸 HTTP 客户端。
+        """
+        if self.context is None:
+            return None
+        try:
+            response = await self.context.request.get(
+                url, timeout=config.IMAGE_DOWNLOAD_TIMEOUT_MS
+            )
+            if response.ok:
+                return await response.body()
+            print(f"[图片] 下载失败 status={response.status} url={url[:80]}")
+        except Exception as exc:  # noqa: BLE001 下载失败一律降级，不阻断提交
+            print(f"[图片] 下载异常 {type(exc).__name__}: url={url[:80]}")
+        return None
+
+    # 合成 paste 事件：把原始字节构造成 File，塞进 DataTransfer 后派发 ClipboardEvent。
+    # 输入框是 contenteditable，无法用 set_input_files；必须模拟真实粘贴。
+    #   * bubbles/composed：穿过 shadow DOM 冒泡到编辑器监听器；
+    #   * cancelable：允许编辑器 preventDefault，行为更接近真实粘贴；
+    #   * evaluate 不能传 bytes，必须 list(data)，页面侧用 new Uint8Array 还原。
+    _PASTE_IMAGE_JS = """
+    ([name, mime, bytesArray]) => {
+      const el = document.activeElement
+        || document.querySelector('[contenteditable="true"]');
+      if (!el) return false;
+      const file = new File([new Uint8Array(bytesArray)], name, {type: mime});
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      el.dispatchEvent(new ClipboardEvent('paste', {
+        clipboardData: dt, bubbles: true, cancelable: true, composed: true,
+      }));
+      return true;
+    }
+    """
+
+    async def _paste_images(self, page, composer, images: list) -> int:
+        """把真实图片文件以合成 paste 事件粘贴进输入框，返回成功派发的张数。
+
+        对每张图：已知字节（base64）直接用；仅远程 URL 的先下载。构造 ``File`` +
+        ``DataTransfer`` 后在聚焦的输入框上派发 ``paste``。失败（下载失败 / 焦点失败 /
+        事件派发异常）只告警不阻断——文本 prompt 里已有 ``[图片]`` 引用行兜底。
+        """
+        if not images or not config.IMAGE_PASTE_ENABLED:
+            return 0
+        pasted = 0
+        for image in images:
+            data = getattr(image, "data", None)
+            if data is None and getattr(image, "url", None):
+                data = await self._download_image(image.url)
+            if not data:
+                continue
+            name = getattr(image, "name", "image.png") or "image.png"
+            mime = getattr(image, "mime", "image/png") or "image/png"
+            try:
+                # 粘贴前确保输入框聚焦：否则 document.activeElement 不是编辑器。
+                if composer is not None:
+                    await self._focus_composer(page, composer)
+                ok = await page.evaluate(self._PASTE_IMAGE_JS, [name, mime, list(data)])
+                if ok:
+                    pasted += 1
+                    if config.DEBUG:
+                        print(f"[图片] 已粘贴 {name}（{mime}, {len(data)} 字节）")
+            except Exception as exc:  # noqa: BLE001 粘贴失败一律降级，不阻断提交
+                print(f"[图片] 粘贴失败 {type(exc).__name__}: name={name}")
+        return pasted
+
     async def _fill_prompt(self, page, prompt: str):
         """把 prompt 写进输入框，返回可提交的句柄；每次尝试都**重新定位**。
 
@@ -1053,11 +1130,13 @@ class ChatIOMixin:
         return extracted
 
     async def _send_chat_locked(self, prompt: str, on_delta=None,
-                                key: str | None = None) -> tuple[str, list[dict]]:
+                                key: str | None = None,
+                                images: list | None = None) -> tuple[str, list[dict]]:
         """发送单条消息并获取响应及提取的代码块。
 
         :param on_delta: 可选异步回调，生成过程中实时吐出增量文本（用于 SSE 流式）。
         :param key: 会话桶标识（决定使用哪一条页面）。
+        :param images: 待粘贴图片；填完文本、提交之前粘贴（失败非致命）。
         """
         bucket = key or DEFAULT_SESSION_KEY
         page = self._page_for(bucket)
@@ -1106,6 +1185,11 @@ class ChatIOMixin:
             #     不再假设「按了 Enter 就发出去了」：写不进去 / 发不出去会立刻抛
             #     可操作的错误，而不是让客户端干等到 RESPONSE_TIMEOUT_S。
             chat_input = await self._fill_prompt(page, prompt)
+            # 图片必须在文本写进输入框之后、按 Enter 之前粘进去：编辑器此时已聚焦、
+            # 文本已在框内，合成 paste 会把图片附加到同一条消息上。粘贴失败只告警，
+            # 不阻断文本提交（prompt 里已有 ``[图片]`` 引用行兜底）。
+            if images:
+                await self._paste_images(page, chat_input, images)
             await self._submit_prompt(page, chat_input, bucket, prompt=prompt)
             # 从确认提交后计时；只保留时间戳和最终的数字指标，不记录正文。
             submitted_at = time.monotonic()

@@ -10,7 +10,7 @@ from typing import Any
 from . import config
 from .driver import DeepSeekBusyError, DeepSeekContextLimitError, DeepSeekTimeoutError
 from .models import ChatCompletionRequest
-from .prompting import estimate_tokens
+from .prompting import estimate_tokens, extract_images
 from .toolcalls import _tool_names, parse_tool_calls
 
 #: SSE 合成流的分帧大小：客户端看到的「增量」就是这个粒度的切片。
@@ -20,6 +20,19 @@ CHUNK_CHARS = 64
 
 def _chunk_text(text: str, size: int = CHUNK_CHARS) -> list[str]:
     return [text[i:i + size] for i in range(0, len(text), size)] or [""]
+
+
+def _collect_images(messages):
+    """抽取本轮要粘贴的图片并按上限裁剪（见 doc/image_upload.md）。
+
+    开关关闭时直接返回空列表（全部降级为 prompt 里的 ``[图片]`` 文本引用）。
+    """
+    if not config.IMAGE_PASTE_ENABLED:
+        return []
+    images = extract_images(messages)
+    if len(images) > config.IMAGE_PASTE_MAX:
+        images = images[: config.IMAGE_PASTE_MAX]
+    return images
 
 
 async def _stream_bridge_reply(request: ChatCompletionRequest, reply: str):
@@ -86,6 +99,8 @@ async def _stream_chat_completion(
     created = int(time.time())
     model = request.model
     wants_tools = bool(request.tools) and request.tool_choice != "none"
+    # 图片：从消息里抽取真实字节（base64）或远程 URL，提交前粘贴进网页输入框。
+    images = _collect_images(request.messages)
 
     def encode(delta: dict[str, Any] | None, finish: str | None = None,
                choices: list | None = None) -> str:
@@ -116,6 +131,7 @@ async def _stream_chat_completion(
                 on_delta=None if wants_tools else on_delta,
                 seeded_prompt=seeded_prompt,
                 key=session_key,
+                images=images,
             )
             await queue.put(("done", (reply, blocks, None, None)))
         except DeepSeekContextLimitError as exc:

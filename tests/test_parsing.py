@@ -24,9 +24,10 @@ class ContentToTextTests(unittest.TestCase):
         content = [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]
         self.assertEqual(srv._content_to_text(content), "a\nb")
 
-    def test_non_text_parts_are_ignored(self):
+    def test_image_parts_render_as_text_reference(self):
+        # 图片分片不再是“被忽略”：渲染成 [图片] 引用行（详见 test_image_upload.py）。
         content = [{"type": "image_url", "image_url": {"url": "x"}}, {"text": "kept"}]
-        self.assertEqual(srv._content_to_text(content), "kept")
+        self.assertEqual(srv._content_to_text(content), "[图片] x\nkept")
 
     def test_dict_without_text(self):
         self.assertEqual(srv._content_to_text({"foo": 1}), "")

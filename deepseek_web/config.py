@@ -157,6 +157,17 @@ SEND_BUTTON_SELECTORS = [
 ]
 
 
+# ==================== 图片上传（见 doc/image_upload.md）====================
+# 把请求里的图片（image_url / base64 data URI）以真实文件粘贴进网页输入框，
+# 让模型读到像素内容，而不是只看到一行 `[图片]` 文本引用。
+# 开关关闭 / 粘贴失败时优雅降级：prompt 里始终保留 `[图片]` 引用行兜底。
+IMAGE_PASTE_ENABLED = env_bool("IMAGE_PASTE_ENABLED", True)
+# 单轮最多粘贴几张图（0 = 全部降级为文本引用）。
+IMAGE_PASTE_MAX = max(0, env_int("IMAGE_PASTE_MAX", 4))
+# 远程图片（http(s) URL）下载超时（毫秒）；走浏览器上下文下载以复用登录态 / cookie。
+IMAGE_DOWNLOAD_TIMEOUT_MS = max(500, env_int("IMAGE_DOWNLOAD_TIMEOUT_MS", 10_000))
+
+
 # ==================== 会话生命周期 ====================
 # 启动时忽略已保存的会话，直接开一个新会话。搭配“播种”使用才安全（首轮会重放历史）。
 NEW_SESSION_ON_START = env_bool("DEEPSEEK_NEW_SESSION")

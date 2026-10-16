@@ -21,7 +21,7 @@ from .driver import (
     SessionState,
 )
 from .models import ChatCompletionRequest, ChatCompletionResponse, ChatMessage
-from .prompting import build_prompt, estimate_tokens
+from .prompting import ImageAttachment, build_prompt, estimate_tokens, extract_images
 from .responses import ResponsesRequest, handle_responses
 from .toolcalls import parse_tool_calls, to_tool_call_models
 
@@ -33,11 +33,13 @@ __all__ = [
     "DeepSeekContextLimitError",
     "DeepSeekTimeoutError",
     "DeepSeekWebDriver",
+    "ImageAttachment",
     "ResponsesRequest",
     "SessionState",
     "build_prompt",
     "config",
     "estimate_tokens",
+    "extract_images",
     "handle_responses",
     "parse_tool_calls",
     "tasks",

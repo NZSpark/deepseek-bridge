@@ -37,7 +37,8 @@ class FakeDriver:
     def needs_seed(self, key=None):
         return False
 
-    async def send_chat(self, prompt, on_delta=None, seeded_prompt=None, key=None):
+    async def send_chat(self, prompt, on_delta=None, seeded_prompt=None, key=None,
+                        images=None):
         self.chats.append({"prompt": prompt, "key": key, "seeded": seeded_prompt})
         self.last_prompt = prompt
         if self.error is not None:

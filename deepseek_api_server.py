@@ -85,10 +85,13 @@ from deepseek_web.models import (  # noqa: F401
 
 # ---- 提示词与文本工具 ----
 from deepseek_web.prompting import (  # noqa: F401
+    MARK_IMAGE,
+    ImageAttachment,
     _content_to_text,
     _delta_piece,
     build_prompt,
     estimate_tokens,
+    extract_images,
 )
 from deepseek_web.server import (  # noqa: F401
     _session_key,

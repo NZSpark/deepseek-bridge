@@ -1,9 +1,120 @@
-"""把客户端的消息数组转换成网页输入框里的一整段文本，以及若干纯文本工具函数。"""
+"""把客户端的消息数组转换成网页输入框里的一整段文本，以及若干纯文本工具函数。
 
+图片支持（见 doc/image_upload.md）：网页输入框只接受文本，图片分片先被渲染成
+一条引用行（``[图片] …``）作为兜底锚点；真正的图片字节由 :mod:`deepseek_web.chat_io`
+在填写文本之后、提交之前**合成 paste 事件**粘贴进输入框（见 ``_paste_images``）。
+"""
+
+import base64
+from dataclasses import dataclass
 from typing import Any
 
 from .models import ChatMessage
 from .toolcalls import format_tool_call_emphasis, format_tools_instruction
+
+#: 图片在文本 prompt 里的引用标记（兜底锚点，绝不包含完整 base64 字节）。
+MARK_IMAGE = "[图片]"
+
+
+@dataclass(slots=True)
+class ImageAttachment:
+    """一张待粘贴进网页输入框的图片。
+
+    ``data`` 为已知原始字节（来自 base64 data URI）；``url`` 为远程地址，
+    由调用方惰性下载后再填回 ``data``。``name`` / ``mime`` 用于构造浏览器里的
+    ``File`` 对象（合成 paste 事件时使用）。
+    """
+
+    name: str
+    mime: str
+    data: bytes | None = None
+    url: str | None = None
+
+
+def _parse_data_uri(url: str) -> tuple[str, bytes] | None:
+    """把 ``data:<mime>;base64,<payload>`` 解析为 (mime, bytes)；失败返回 None。"""
+    header, _, payload = url.partition(",")
+    if ";base64" not in header or not payload:
+        return None
+    mime = header.removeprefix("data:").split(";", 1)[0] or "application/octet-stream"
+    try:
+        return mime, base64.b64decode(payload, validate=False)
+    except (ValueError, TypeError):
+        return None
+
+
+def _image_url(part: dict[str, Any]) -> str | None:
+    """从图片分片里取出 URL（兼容 image_url 为 dict / str、以及裸 url 字段）。"""
+    image_url = part.get("image_url")
+    if isinstance(image_url, dict):
+        url = image_url.get("url")
+    elif isinstance(image_url, str):
+        url = image_url
+    else:
+        url = part.get("url")
+    return url.strip() if isinstance(url, str) and url.strip() else None
+
+
+def _is_image_part(part: dict[str, Any]) -> bool:
+    """该分片是否是图片（兼容 OpenAI / Responses API 的多种写法）。"""
+    part_type = str(part.get("type", "")).lower()
+    if part_type in {"image_url", "input_image", "image"}:
+        return True
+    return "image_url" in part or "image" in part
+
+
+def _image_reference(part: dict[str, Any]) -> str | None:
+    """把图片分片转成网页版可读的文本引用行。
+
+    远程 URL 原样保留；base64 data URI 仅记录类型与估算大小，**不外泄完整字节**
+    （否则 prompt 会爆炸且会泄漏图片内容）。无法识别时返回 None。
+    """
+    url = _image_url(part)
+    if url is None:
+        return None
+    if url.startswith("data:"):
+        header, _, payload = url.partition(",")
+        media = header.removeprefix("data:").split(";", 1)[0] or "image"
+        approx_kb = max(1, len(payload) * 3 // 4 // 1024)
+        return f"{MARK_IMAGE} ({media}, ~{approx_kb}KB base64)"
+    return f"{MARK_IMAGE} {url}"
+
+
+def extract_images(messages: list[Any]) -> list[ImageAttachment]:
+    """从消息里收集图片分片，供浏览器真实粘贴。
+
+    base64 data URI 直接解码为字节；远程 URL 保留 ``url``（``data=None``）由调用方
+    惰性下载。顺序保留；本轮通常只关心最近的消息，数量上限由调用方裁剪。
+    """
+    attachments: list[ImageAttachment] = []
+    for message in messages:
+        if isinstance(message, dict):
+            content = message.get("content")
+        else:
+            content = getattr(message, "content", None)
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not (isinstance(part, dict) and _is_image_part(part)):
+                continue
+            url = _image_url(part)
+            if not url:
+                continue
+            if url.startswith("data:"):
+                parsed = _parse_data_uri(url)
+                if parsed is None:
+                    continue
+                mime, data = parsed
+                if not data:
+                    # 非法 / 空的 base64 解出来是 b""：不算有效图片，直接跳过，
+                    # 免得下游粘贴一个 0 字节的 File。
+                    continue
+                ext = mime.split("/")[-1] or "png"
+                attachments.append(ImageAttachment(name=f"image.{ext}", mime=mime, data=data))
+            else:
+                name = url.rsplit("/", 1)[-1].split("?", 1)[0] or "image.png"
+                attachments.append(ImageAttachment(name=name, mime="image/png", url=url))
+    return attachments
 
 
 def _content_to_text(content: Any) -> str:
@@ -13,6 +124,7 @@ def _content_to_text(content: Any) -> str:
       - None
       - 字符串
       - 内容分片数组，例如 [{"type": "text", "text": "hi"}]
+    图片分片被转成文本引用行（``[图片] …``），不影响文本分片的解析。
     """
     if content is None:
         return ""
@@ -24,11 +136,18 @@ def _content_to_text(content: Any) -> str:
             if isinstance(part, str):
                 pieces.append(part)
             elif isinstance(part, dict):
+                if _is_image_part(part):
+                    ref = _image_reference(part)
+                    if ref:
+                        pieces.append(ref)
+                    continue
                 text = part.get("text")
                 if isinstance(text, str):
                     pieces.append(text)
         return "\n".join(pieces)
     if isinstance(content, dict):
+        if _is_image_part(content):
+            return _image_reference(content) or ""
         text = content.get("text")
         return text if isinstance(text, str) else ""
     return str(content)
