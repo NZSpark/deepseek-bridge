@@ -1343,8 +1343,13 @@ class ChatIOMixin:
                     streamed=bool(streamed),
                 ),
             )
+            speed_metrics = speed.to_dict()
+            # 关键：把本轮数值累加进该桶的会话状态并落盘，否则 ``/bridge token`` 永远
+            # 读到「暂无样本」。只写计数与时长，不含 prompt / reply 正文（见 session_store）。
+            # 仅在成功产出回复的这一路径上调用，取消 / 失败轮不会走到这里。
+            self.note_speed(speed_metrics, key=bucket)
             metric_json = json.dumps(
-                speed.to_dict(), ensure_ascii=False, separators=(",", ":")
+                speed_metrics, ensure_ascii=False, separators=(",", ":")
             )
             print("[测速] " + metric_json)
 

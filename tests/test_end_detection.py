@@ -212,6 +212,35 @@ class GeneratingStateTests(EndDetectionTestCase):
         self.assertEqual(text, "答案")
 
 
+class SpeedPersistenceTests(EndDetectionTestCase):
+    """回归：真实生成路径必须把测速样本落进会话状态。
+
+    曾经的 bug：``_send_chat_locked`` 里 ``compute_speed`` 算了、也打印了
+    ``[测速]``，却从没调用 ``note_speed`` 落盘，于是 ``/bridge token`` 永远
+    显示「暂无样本」。下面的用例直接驱动真实生成路径（假 page、不开浏览器）。
+    """
+
+    def test_successful_generation_records_a_speed_sample(self):
+        page = FakePage(
+            baseline=["旧"],
+            script=[["答案"], ["答案"], ["答案"]],
+        )
+        driver = self.driver_for(page)
+        self.assertEqual(driver.speed_stats()["samples"], 0)
+
+        self.run_chat(driver)
+
+        stats = driver.speed_stats()
+        self.assertEqual(stats["samples"], 1, "成功生成后必须累计一个测速样本")
+        self.assertIsNotNone(stats["last"])
+        last = stats["last"]
+        # 只落数值：不应把 prompt / reply 正文写进快照
+        for key in ("prompt_chars", "reply_chars", "prompt_tokens", "reply_tokens",
+                    "ttft_s", "decode_s", "prefill_tps", "decode_tps"):
+            self.assertIn(key, last)
+        self.assertNotIn("答案", str(last))
+
+
 class StreamingDeltaTests(EndDetectionTestCase):
     def test_deltas_reconstruct_the_final_text(self):
         page = FakePage(

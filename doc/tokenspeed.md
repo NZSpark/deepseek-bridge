@@ -180,6 +180,13 @@ bridge_overhead_ratio = 1 − (T_gen_adj / total_s)
 - `deepseek_web/session_store.py`：`SessionState` 增加数值和字段；`note_speed` 累加并落盘；
   `speed_stats` 读出本轮 + 桶平均。
 
+> **落地状态（务必对照代码）**：`compute_speed` 只有在**成功产出一轮回复**后
+> 被 `chat_io._send_chat_locked` 调用、并把 `speed.to_dict()` 交给
+> `self.note_speed(..., key=bucket)` 落盘，`/bridge token` 才读得到样本。
+> 曾经这里漏了落盘那一步：`[测速]` 日志照打，但 `speed_samples` 恒为 0，命令永远
+> 显示「暂无样本」。回归由 `tests/test_end_detection.py::SpeedPersistenceTests` 守住——
+> 它驱动真实生成路径，断言成功一轮后 `speed_stats()["samples"] == 1`。
+
 ### 5.3 会话级聚合
 
 `SessionState` 新增（schema 向后兼容，缺失默认 0）：
