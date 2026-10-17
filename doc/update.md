@@ -307,3 +307,34 @@
 4. **多种失败原因会收敛到同一个症状（超时）**。凡复用外部会话/进程处，都要把“上游明确拒绝”与“上游无响应”区分开；
 5. **给单例对象加字段前先问：它属于“进程”还是“任务”？** driver 是全局单例，而 `has_history`/`turns`/`cap_hit` 是**任务级**状态，写死在单例上多任务必互相覆盖 —— 已收进 `SessionState` 并按桶存放，用**属性代理**保住默认桶旧用法；
 6. **“重新推导状态”前先问：推导出来的值，真的等于事实吗？** `_ensure_page` 用“有 url”当作“页面真的落在会话里”——这两件事在 99% 的情况下相等，但差距正好落在“会话被删 / 被登出重定向”这条**不会报错、只会瞎答**的路径上。结论：能用**观察**（`_current_session_url()`）验证的事实，就不要用**推导**替代；同时，审阅别人的修复建议时也要先确认它引用的字段/API **真实存在**（本轮就抓出一条引用虚构字段的建议）。
+
+## 2026-10-17 提示词「严禁输出 DSML」= 把原生工具 DSL 示范了一遍（P0-N）
+
+**现象**：带 tools 的请求里，模型稳定不吐 `tool_call` 围栏，而吐 DeepSeek 原生工具 DSL
+（`<｜｜DSML｜｜ calls>…<｜｜DSML｜｜ invoke name="bash">…`）。客户端把它当 XML 文本，调用被静默丢弃。
+
+**根因**：注入提示词与「输出格式强调」块里都有一句反面示范：
+
+```text
+除 ```tool_call 围栏外，严禁输出 <｜DSML｜ ...>、<invoke>/<parameter>、<tool_calls> 等 XML/DSL 标记。
+```
+
+DeepSeek 网页版本身就用这套 DSML 标记训练工具调用。把标记的**字面形状**写进上下文，等于给
+模型一个可复制的模板；「严禁」在模型眼里只是弱约束，而「这个形状存在」是强信号。越强调不要写，
+激活越强——**禁止变成诱导**。新会话（无正确示范轮次）最明显。
+
+**修复**：
+- `format_tools_instruction()` / `format_tool_call_emphasis()` 删除所有原生标记字面量，
+  改为只给正面格式 + 「代码块之外的其它写法不会被读取，任务会直接失败」。
+- 强调块 docstring 写明「不要在这里写出原生标记的形状」，防止后人又加回去。
+- 解析层（`_DSML_*`）保持兼容：那是兜底，不是允许示范——两件事不能互相抵消。
+
+**回归**：`tests/test_parsing.py::test_instruction_never_spells_native_markers`
+（断言两份提示词都不含 `DSML` / `<invoke` / `<parameter` / `<tool_call`，且都含 `tool_call` 围栏）、
+`test_seed_prompt_always_specifies_tool_call_format`（播种 prompt 同样断言不含原生标记）。
+
+**验证**：`pytest tests -q` 全绿（1 skip = E2E）；`ruff check deepseek_web/toolcalls.py tests/test_parsing.py` 通过。
+
+**通用模式**：任何「禁止模型输出某种形状」的提示词，先问「这个形状它本来就会输出吗」。是的话，
+唯一正确写法是**只给正面格式**，把被禁形状彻底移出上下文。skill 已同步为事故档案 P0-N
++ 回归模板 `test_p0n_prompt_never_spells_native_tool_markers`（`TEMPLATE_VARIANT=p0n` 时必红）。

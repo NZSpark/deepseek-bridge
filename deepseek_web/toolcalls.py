@@ -78,8 +78,8 @@ def format_tools_instruction(tools: list[dict[str, Any]]) -> str:
         "如果不需要调用任何工具，请直接给出最终回答，不要输出 tool_call 代码块。",
         "工具名必须逐字使用上面列出的名字，不要自造 bash / shell 之类的通用名。",
         (
-            "除 ```tool_call 围栏外，严禁输出 <｜DSML｜ ...>、<invoke>/<parameter>、<tool_calls> "
-            "等 XML/DSL 标记——那些格式不会被执行，任务会直接失败。"
+            "只使用上面这种 ```tool_call 围栏格式；代码块之外的其它写法不会被读取，"
+            "任务会直接失败。"
         ),
     ]
     return "\n".join(lines)
@@ -88,8 +88,11 @@ def format_tools_instruction(tools: list[dict[str, Any]]) -> str:
 def format_tool_call_emphasis() -> str:
     """新会话 / 重置会话时，放在播种 prompt **开头**的格式强调块。
 
-    新 bucket 没有“示范过正确格式”的历史轮次，模型最容易在这时候
-    退回原生 DSML 标记；把带围栏示例的完整格式再点一遍，双保险。
+    新 bucket 没有“示范过正确格式”的历史轮次，模型最容易在这时候退回原生工具 DSL；
+    把带围栏示例的完整格式再点一遍，双保险。
+
+    **不要在这里写出原生标记的字面形状**（见 P0-N）：模型本来就用那套标记训练，
+    「禁止输出 X」等于把 X 示范一遍，「禁止」会变成「诱导」。只给正面格式与后果句。
     """
     return (
         "[输出格式强调] 这是一个新会话（或刚被重置），以下规则本会话持续有效：\n"
@@ -98,8 +101,7 @@ def format_tool_call_emphasis() -> str:
         '{"name": "工具名", "arguments": {参数对象}}\n'
         "```\n"
         "工具名必须逐字使用 [工具调用说明] 中列出的名字，不要自造 bash / shell 之类的通用名。\n"
-        "禁止输出 <｜DSML｜ ...>、<invoke>/<parameter>、<tool_calls> 等 XML/DSL 标记"
-        "——它们不会被执行。"
+        "只使用上面这种围栏格式；代码块之外的其它写法不会被读取，任务会直接失败。"
     )
 
 

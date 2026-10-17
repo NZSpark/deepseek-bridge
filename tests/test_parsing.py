@@ -282,18 +282,31 @@ class BuildPromptTests(unittest.TestCase):
         self.assertIn("```tool_call", prompt)
         self.assertIn("[输出格式强调]", prompt)
         self.assertIn('{"name": "工具名", "arguments": {参数对象}}', prompt)
-        self.assertIn("DSML", prompt)
+        # P0-N：提示词里绝不能出现原生工具标记的字面形状——那等于示范，模型会立刻复现。
+        self.assertNotIn("DSML", prompt)
+        self.assertNotIn("<invoke", prompt)
+        self.assertNotIn("<parameter", prompt)
+        self.assertNotIn("<tool_call", prompt)
         # 强调块（含围栏示例）在播种开头，完整说明在文末
         self.assertLess(prompt.index("[输出格式强调]"), prompt.index("[工具调用说明]"))
         self.assertLess(prompt.index('{"name": "工具名"'), prompt.index("[工具调用说明]"))
 
-    def test_instruction_forbids_dsml_and_invented_names(self):
-        from deepseek_web.toolcalls import format_tools_instruction
+    def test_instruction_never_spells_native_markers(self):
+        """P0-N：「禁止输出 X」若把 X 的形状写出来，等于示范（禁止变成诱导）。"""
+        from deepseek_web.toolcalls import format_tool_call_emphasis, format_tools_instruction
+
         text = format_tools_instruction(
             [{"type": "function", "function": {"name": "exec_command"}}]
         )
-        self.assertIn("严禁输出 <｜DSML｜", text)
+        self.assertIn("```tool_call", text)
         self.assertIn("不要自造", text)
+        for forbidden in ("DSML", "<invoke", "<parameter", "<tool_call"):
+            self.assertNotIn(forbidden, text, f"提示词示范了原生标记：{forbidden}")
+
+        emphasis = format_tool_call_emphasis()
+        self.assertIn("```tool_call", emphasis)
+        for forbidden in ("DSML", "<invoke", "<parameter", "<tool_call"):
+            self.assertNotIn(forbidden, emphasis, f"强调块示范了原生标记：{forbidden}")
 
     def test_no_messages_after_assistant_falls_back_to_last_user(self):
         messages = [self._msg("user", "早"), self._msg("assistant", "晚")]
