@@ -308,19 +308,21 @@ class TokenCommandTests(unittest.TestCase):
         speed = {
             "samples": 12,
             "last": {
-                "prompt_tokens": 3700,
-                "reply_tokens": 420,
-                "ttft_s": 3.0,
-                "ttft_adj_s": 2.8,
-                "decode_s": 8.1,
-                "decode_adj_s": 5.6,
-                "prefill_tps": 1234.0,
-                "decode_tps": 52.0,
-                "settle_credit_s": 2.5,
-                "bridge_overhead_ratio": 0.18,
+                "prompt_tokens_est": 3700,
+                "reply_tokens_est": 420,
+                "page_ttft_observed_s": 3.0,
+                "page_growth_window_s": 8.1,
+                "page_generation_to_finish_s": 10.6,
+                "settle_observed_s": 2.5,
+                "request_e2e_s": 12.0,
+                "prompt_rate_est_tps": 1234.0,
+                "page_decode_tps_est": 52.0,
+                "quality_flags": ["token_estimate"],
             },
-            "prefill_tps_avg": 1180.0,
-            "decode_tps_avg": 55.0,
+            "mean_prompt_rate_est_tps": 1180.0,
+            "mean_decode_tps_est": 55.0,
+            "aggregate_decode_tps_est": 60.0,
+            "aggregate_prompt_rate_est_tps": 1200.0,
             "ttft_s_avg": 3.1,
             "decode_s_avg": 8.0,
         }
@@ -329,18 +331,20 @@ class TokenCommandTests(unittest.TestCase):
         self.assertIn("1,234 tok/s", reply)
         self.assertIn("3,700 tok", reply)
         self.assertIn("近 12 轮", reply)
-        self.assertIn("桥接开销占比", reply)
+        self.assertIn("整体聚合吞吐率", reply)
         self.assertIn("估算", reply)  # 口径必须写明
 
     def test_short_reply_gets_a_caveat(self):
         speed = {
             "samples": 1,
-            "last": {"reply_tokens": 12, "prefill_tps": 100.0, "decode_tps": 5.0,
-                     "ttft_s": 1.0, "ttft_adj_s": 0.8, "decode_s": 2.0,
-                     "decode_adj_s": 1.5, "settle_credit_s": 0.5,
-                     "prompt_tokens": 30, "bridge_overhead_ratio": 0.2},
-            "prefill_tps_avg": 100.0,
-            "decode_tps_avg": 5.0,
+            "last": {"reply_tokens_est": 12, "prompt_rate_est_tps": 100.0,
+                     "page_decode_tps_est": 5.0, "page_ttft_observed_s": 1.0,
+                     "page_growth_window_s": 2.0, "settle_observed_s": 0.5,
+                     "prompt_tokens_est": 30, "quality_flags": ["token_estimate"]},
+            "mean_prompt_rate_est_tps": 100.0,
+            "mean_decode_tps_est": 5.0,
+            "aggregate_decode_tps_est": 5.0,
+            "aggregate_prompt_rate_est_tps": 100.0,
             "ttft_s_avg": 1.0,
             "decode_s_avg": 2.0,
         }

@@ -11,6 +11,7 @@ from . import config
 from .driver import DeepSeekBusyError, DeepSeekContextLimitError, DeepSeekTimeoutError
 from .models import ChatCompletionRequest
 from .prompting import estimate_tokens, extract_images
+from .token_speed import TokenSpeed, apply_stream_timing
 from .toolcalls import _tool_names, parse_tool_calls
 
 #: SSE 合成流的分帧大小：客户端看到的「增量」就是这个粒度的切片。
@@ -82,6 +83,40 @@ async def _stream_bridge_reply(request: ChatCompletionRequest, reply: str):
     yield "data: [DONE]\n\n"
 
 
+def _patch_stream_timing(driver, session_key, started_at, first_content_at, done_at):
+    """把流式端到端计时并入该桶最近一轮 speed（服务端发送口径）。
+
+    只更新已有的最近一轮样本，不新增样本；driver 不支持时静默跳过。
+    """
+    patch = getattr(driver, "patch_last_speed", None)
+    stats_fn = getattr(driver, "speed_stats", None)
+    if not callable(patch) or not callable(stats_fn):
+        return
+    try:
+        last = (stats_fn(session_key) or {}).get("last") or {}
+        if not last:
+            return
+        known = {f: last[f] for f in TokenSpeed.__dataclass_fields__ if f in last}
+        base = TokenSpeed(**known)
+        updated = apply_stream_timing(
+            base,
+            started_at=started_at,
+            first_content_at=first_content_at,
+            done_at=done_at,
+        )
+        patch(
+            {
+                "stream_first_content_latency_s": updated.stream_first_content_latency_s,
+                "stream_completion_window_s": updated.stream_completion_window_s,
+                "stream_effective_output_tps": updated.stream_effective_output_tps,
+                "request_e2e_s": updated.request_e2e_s,
+            },
+            key=session_key,
+        )
+    except Exception:  # noqa: BLE001 计时补丁失败不得影响正常响应
+        pass
+
+
 async def _stream_chat_completion(
     request: ChatCompletionRequest,
     prompt: str,
@@ -101,6 +136,10 @@ async def _stream_chat_completion(
     wants_tools = bool(request.tools) and request.tool_choice != "none"
     # 图片：从消息里抽取真实字节（base64）或远程 URL，提交前粘贴进网页输入框。
     images = _collect_images(request.messages)
+    # 流式服务端计时：t0 = 进入流式处理；t10/t11 在真正写出正文 / [DONE] 时记录。
+    stream_started_at = time.monotonic()
+    first_content_at: float | None = None
+    done_at: float | None = None
 
     def encode(delta: dict[str, Any] | None, finish: str | None = None,
                choices: list | None = None) -> str:
@@ -178,6 +217,8 @@ async def _stream_chat_completion(
 
         if kind == "delta":
             streamed = True
+            if first_content_at is None:
+                first_content_at = time.monotonic()
             yield encode({"content": payload})
         else:
             reply_content, _blocks, error, error_type = payload
@@ -212,6 +253,8 @@ async def _stream_chat_completion(
     else:
         if not streamed and reply_content:
             for piece in _chunk_text(reply_content):
+                if first_content_at is None:
+                    first_content_at = time.monotonic()
                 yield encode({"content": piece})
         yield encode(None, finish="stop")
 
@@ -237,4 +280,6 @@ async def _stream_chat_completion(
         }
         yield f"data: {json.dumps(usage_payload, ensure_ascii=False)}\n\n"
 
+    done_at = time.monotonic()
+    _patch_stream_timing(driver, session_key, stream_started_at, first_content_at, done_at)
     yield "data: [DONE]\n\n"

@@ -370,19 +370,29 @@ def _token_reply(driver, bucket: str) -> str:
     last = stats.get("last") or {}
     if last:
         lines.extend(_token_block("本轮", last, indent="  "))
-    lines.append(f"  本桶平均（近 {samples} 轮）：")
+    lines.append(f"  本桶统计（近 {samples} 轮有效样本）：")
     lines.append(
-        f"    prefill {_num(stats.get('prefill_tps_avg'))} tok/s；"
-        f"decode {_num(stats.get('decode_tps_avg'))} tok/s；"
-        f"TTFT {_sec(stats.get('ttft_s_avg'))}s"
+        f"    平均单次输出速度 {_num(stats.get('mean_decode_tps_est'))} tok/s；"
+        f"整体聚合吞吐率 {_num(stats.get('aggregate_decode_tps_est'))} tok/s"
     )
     lines.append(
-        "  口径：token 数为字符数/3 的估算；速度为「网页版真实链路下的有效速度」，"
-        "非模型裸速度；仅统计成功的生成。"
+        f"    平均单次输入速率 {_num(stats.get('mean_prompt_rate_est_tps'))} tok/s；"
+        f"整体聚合输入速率 {_num(stats.get('aggregate_prompt_rate_est_tps'))} tok/s"
     )
-    reply_tokens = int(last.get("reply_tokens") or 0)
+    lines.append(
+        f"    平均页面首字延迟 {_sec(stats.get('ttft_s_avg'))}s；"
+        f"平均增长窗口 {_sec(stats.get('decode_s_avg'))}s"
+    )
+    lines.append(
+        "  口径：token 数为字符估算（非精确）；时间与速度均为网页快照观测值，"
+        "非模型裸速度；仅统计成功且有效的生成。"
+    )
+    reply_tokens = int(last.get("reply_tokens_est") or 0)
     if reply_tokens and reply_tokens < SHORT_REPLY_TOKENS:
         lines.append("  注意：最近一轮回复过短，速度估计误差较大，仅供参考。")
+    flags = last.get("quality_flags") or ()
+    if flags:
+        lines.append(f"  质量标记：{', '.join(flags)}")
     return "\n".join(lines)
 
 
@@ -391,21 +401,22 @@ def _token_block(label: str, speed: dict, indent: str = "  ") -> list[str]:
     inner = indent + "  "
     lines = [f"{indent}{label}："]
     lines.append(
-        f"{inner}prefill {_num(speed.get('prefill_tps'))} tok/s"
-        f"（输入 {_count(speed.get('prompt_tokens'))} tok / 首字 {_sec(speed.get('ttft_s'))}s）"
+        f"{inner}输入速率约 {_num(speed.get('prompt_rate_est_tps'))} tok/s（估算）"
+        f"（输入 {_count(speed.get('prompt_tokens_est'))} tok / 页面首字 "
+        f"{_sec(speed.get('page_ttft_observed_s'))}s）"
     )
     lines.append(
-        f"{inner}decode {_num(speed.get('decode_tps'))} tok/s"
-        f"（输出 {_count(speed.get('reply_tokens'))} tok / 解码 {_sec(speed.get('decode_s'))}s）"
+        f"{inner}输出速度约 {_num(speed.get('page_decode_tps_est'))} tok/s（估算）"
+        f"（输出 {_count(speed.get('reply_tokens_est'))} tok / 增长窗口 "
+        f"{_sec(speed.get('page_growth_window_s'))}s）"
     )
     lines.append(
-        f"{inner}TTFT {_sec(speed.get('ttft_s'))}s（修正后 {_sec(speed.get('ttft_adj_s'))}s）；"
-        f"decode {_sec(speed.get('decode_s'))}s（修正后 {_sec(speed.get('decode_adj_s'))}s，"
-        f"已扣落定 {_sec(speed.get('settle_credit_s'))}s）"
+        f"{inner}完成判定等待 {_sec(speed.get('settle_observed_s'))}s；"
+        f"首字至结束 {_sec(speed.get('page_generation_to_finish_s'))}s"
     )
-    overhead = speed.get("bridge_overhead_ratio")
-    if overhead is not None:
-        lines.append(f"{inner}桥接开销占比 ≈ {round(float(overhead) * 100)}%")
+    e2e = speed.get("request_e2e_s")
+    if e2e is not None:
+        lines.append(f"{inner}请求端到端 {_sec(e2e)}s")
     return lines
 
 

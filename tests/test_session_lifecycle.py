@@ -292,24 +292,30 @@ class SessionStateTests(SessionTestCase):
         stats = driver.speed_stats()
         self.assertEqual(stats["samples"], 0)
         self.assertIsNone(stats["last"])
-        self.assertEqual(stats["prefill_tps_avg"], 0.0)
+        self.assertIsNone(stats["mean_prompt_rate_est_tps"])
 
     def test_note_speed_accumulates_and_persists_without_text(self):
         page = FakePage()
         driver = self.driver_for(page)
         body_prompt = "很机密的提示词不该落盘"
         body_reply = "很机密的回复正文不该落盘"
-        driver.note_speed({"prefill_tps": 1000.0, "decode_tps": 50.0, "ttft_s": 3.0,
-                           "decode_s": 8.0, "prompt_chars": len(body_prompt),
-                           "reply_chars": len(body_reply)})
-        driver.note_speed({"prefill_tps": 1200.0, "decode_tps": 60.0, "ttft_s": 4.0,
-                           "decode_s": 10.0, "prompt_chars": len(body_prompt),
-                           "reply_chars": len(body_reply)})
+        sample_a = {"prompt_rate_est_tps": 1000.0, "page_decode_tps_est": 50.0,
+                    "page_ttft_observed_s": 3.0, "page_growth_window_s": 8.0,
+                    "prompt_tokens_est": 100, "reply_tokens_est": 400,
+                    "prompt_chars": len(body_prompt), "reply_chars": len(body_reply)}
+        sample_b = {"prompt_rate_est_tps": 1200.0, "page_decode_tps_est": 60.0,
+                    "page_ttft_observed_s": 4.0, "page_growth_window_s": 10.0,
+                    "prompt_tokens_est": 100, "reply_tokens_est": 600,
+                    "prompt_chars": len(body_prompt), "reply_chars": len(body_reply)}
+        driver.note_speed(sample_a)
+        driver.note_speed(sample_b)
         stats = driver.speed_stats()
         self.assertEqual(stats["samples"], 2)
-        self.assertAlmostEqual(stats["prefill_tps_avg"], 1100.0)
-        self.assertAlmostEqual(stats["decode_tps_avg"], 55.0)
+        self.assertAlmostEqual(stats["mean_prompt_rate_est_tps"], 1100.0)
+        self.assertAlmostEqual(stats["mean_decode_tps_est"], 55.0)
         self.assertAlmostEqual(stats["ttft_s_avg"], 3.5)
+        # 整体聚合吞吐率 = (400+600)/(8+10)
+        self.assertAlmostEqual(stats["aggregate_decode_tps_est"], 1000 / 18)
         # 落盘只含数值和与最近一轮数值快照，不含任何对话正文
         raw = self._tmp.read_text(encoding="utf-8")
         self.assertNotIn(body_prompt, raw)
@@ -320,8 +326,10 @@ class SessionStateTests(SessionTestCase):
 
     def test_speed_stats_are_isolated_per_bucket(self):
         driver = self.driver_for(FakePage())
-        driver.note_speed({"prefill_tps": 100.0, "decode_tps": 10.0, "ttft_s": 1.0,
-                           "decode_s": 1.0}, key="bucket-a")
+        driver.note_speed({"prompt_rate_est_tps": 100.0, "page_decode_tps_est": 10.0,
+                           "page_ttft_observed_s": 1.0, "page_growth_window_s": 1.0,
+                           "prompt_tokens_est": 10, "reply_tokens_est": 10},
+                          key="bucket-a")
         self.assertEqual(driver.speed_stats("bucket-a")["samples"], 1)
         self.assertEqual(driver.speed_stats("bucket-b")["samples"], 0)
 

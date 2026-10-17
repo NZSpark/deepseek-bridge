@@ -235,8 +235,9 @@ class SpeedPersistenceTests(EndDetectionTestCase):
         self.assertIsNotNone(stats["last"])
         last = stats["last"]
         # 只落数值：不应把 prompt / reply 正文写进快照
-        for key in ("prompt_chars", "reply_chars", "prompt_tokens", "reply_tokens",
-                    "ttft_s", "decode_s", "prefill_tps", "decode_tps"):
+        for key in ("prompt_chars", "reply_chars", "prompt_tokens_est", "reply_tokens_est",
+                    "page_ttft_observed_s", "page_growth_window_s",
+                    "prompt_rate_est_tps", "page_decode_tps_est", "quality_flags"):
             self.assertIn(key, last)
         self.assertNotIn("答案", str(last))
 

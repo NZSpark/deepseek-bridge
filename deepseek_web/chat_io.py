@@ -1194,7 +1194,9 @@ class ChatIOMixin:
             # 从确认提交后计时；只保留时间戳和最终的数字指标，不记录正文。
             submitted_at = time.monotonic()
             first_text_at: float | None = None
-            settle_credit_s = 0.0
+            # t7：最后一次观察到正文变化的时刻。文本增长窗口 = last_change_at - first_text_at，
+            # 完成判定等待 = finished_at - last_change_at。两者分开记录，不再混作 decode。
+            last_change_at: float | None = None
 
             # 2. 轮询等待回复完成
             await asyncio.sleep(config.POLL_INTERVAL_S)
@@ -1296,6 +1298,9 @@ class ChatIOMixin:
                 )
                 if first_text_at is None and reply_seen and has_new_text:
                     first_text_at = time.monotonic()
+                    # 首次正文出现也是"变化"的起点；后续每轮变化会刷新它。
+                    if last_change_at is None:
+                        last_change_at = first_text_at
 
                 # 1.1 还没有新回复时，周期性检查是否“会话到顶”。
                 #     到顶与“真的卡住”在外表上完全一样（页面不再产生新回复），
@@ -1351,9 +1356,8 @@ class ChatIOMixin:
                         threshold = config.STABLE_POLLS if same_text else config.LEN_STABLE_POLLS
                         if stable_count >= threshold:
                             last_text = current_text
-                            # 稳定轮询本身会引入检测延迟。只将实际经历的稳定判定
-                            # 轮询周期作为保守修正，compute_speed 会将其限制在 decode 时长内。
-                            settle_credit_s += max(0.0, config.POLL_INTERVAL_S) * max(0, threshold)
+                            # 完成判定等待不再"预扣"成 decode 修正：原始观测值全部保留，
+                            # settle_observed_s = finished_at - last_change_at 单独记录。
                             if await _maybe_continue():
                                 await asyncio.sleep(config.POLL_INTERVAL_S)
                                 continue
@@ -1373,6 +1377,10 @@ class ChatIOMixin:
                         if piece:
                             await on_delta(piece)
 
+                    # 文本较上一轮发生变化：记录"最后一次变化"时刻（t7）。
+                    # 完成判定等待 = finished_at - last_change_at，与增长窗口分开。
+                    if normalized != last_normalized:
+                        last_change_at = time.monotonic()
                     last_text = current_text
                     last_normalized = normalized
                     last_len = len(normalized)
@@ -1421,8 +1429,8 @@ class ChatIOMixin:
                     submitted_at=submitted_at,
                     first_text_at=first_text_at,
                     finished_at=finished_at,
+                    last_change_at=last_change_at,
                     poll_interval_s=config.POLL_INTERVAL_S,
-                    settle_credit_s=settle_credit_s,
                     saw_generating=saw_generating,
                     streamed=bool(streamed),
                 ),

@@ -42,10 +42,14 @@ class SessionState:
     # ``speed_samples`` / ``speed_*_sum`` 是 /bridge token 的桶平均值来源；
     # ``last_speed`` 保存最近一轮的完整指标（同样是纯数值）。
     speed_samples: int = 0
-    speed_prefill_tps_sum: float = 0.0
-    speed_decode_tps_sum: float = 0.0
+    # 平均单次速度用（速度和）
+    speed_prompt_rate_sum: float = 0.0
+    speed_decode_rate_sum: float = 0.0
+    # 整体聚合吞吐率用（token 总和与时长总和来自同一组有效样本）
+    speed_reply_tokens_sum: int = 0
+    speed_growth_seconds_sum: float = 0.0
+    speed_prompt_tokens_sum: int = 0
     speed_ttft_s_sum: float = 0.0
-    speed_decode_s_sum: float = 0.0
     last_speed: dict[str, Any] | None = None
 
     def to_payload(self) -> dict[str, Any]:
@@ -65,16 +69,19 @@ class SessionState:
         for name in ("has_history", "cap_hit", "pending_rotation", "pending_reseed"):
             if name in payload:
                 setattr(state, name, bool(payload.get(name)))
-        for name in ("turns", "est_tokens", "updated_at", "speed_samples"):
+        for name in (
+            "turns", "est_tokens", "updated_at", "speed_samples",
+            "speed_reply_tokens_sum", "speed_prompt_tokens_sum",
+        ):
             try:
                 setattr(state, name, int(payload.get(name) or 0))
             except (TypeError, ValueError):
                 setattr(state, name, 0)
         for name in (
-            "speed_prefill_tps_sum",
-            "speed_decode_tps_sum",
+            "speed_prompt_rate_sum",
+            "speed_decode_rate_sum",
+            "speed_growth_seconds_sum",
             "speed_ttft_s_sum",
-            "speed_decode_s_sum",
         ):
             try:
                 setattr(state, name, float(payload.get(name) or 0.0))
@@ -280,12 +287,36 @@ class SessionStoreMixin:
         """
         bucket = key or DEFAULT_SESSION_KEY
         state = self._state(bucket)
-        state.speed_samples += 1
-        state.speed_prefill_tps_sum += float(speed.get("prefill_tps") or 0.0)
-        state.speed_decode_tps_sum += float(speed.get("decode_tps") or 0.0)
-        state.speed_ttft_s_sum += float(speed.get("ttft_s") or 0.0)
-        state.speed_decode_s_sum += float(speed.get("decode_s") or 0.0)
+        # 有效样本判定与 token_speed._speed_usable 一致：速度可用、非重写、无致命标记。
+        flags = set(speed.get("quality_flags") or ())
+        invalid = {"rewritten", "no_generation_signal", "invalid_timing"}
+        usable = (
+            speed.get("page_decode_tps_est") is not None and not (flags & invalid)
+        )
+        if usable:
+            state.speed_samples += 1
+            state.speed_prompt_rate_sum += float(speed.get("prompt_rate_est_tps") or 0.0)
+            state.speed_decode_rate_sum += float(speed.get("page_decode_tps_est") or 0.0)
+            state.speed_reply_tokens_sum += int(speed.get("reply_tokens_est") or 0)
+            state.speed_growth_seconds_sum += float(speed.get("page_growth_window_s") or 0.0)
+            state.speed_prompt_tokens_sum += int(speed.get("prompt_tokens_est") or 0)
+            state.speed_ttft_s_sum += float(speed.get("page_ttft_observed_s") or 0.0)
         state.last_speed = dict(speed)
+        self._save_session_state(key=bucket)
+
+    def patch_last_speed(self, updates: dict[str, Any], key: str | None = None) -> None:
+        """把额外的数值字段并入最近一轮 speed 快照并落盘（不新增样本）。
+
+        用于流式路径：生成完成后才知道 ``t10``/``t11``，此时把流式端到端指标
+        补进**同一轮**的 ``last_speed``，而不是再计一个样本。
+        """
+        bucket = key or DEFAULT_SESSION_KEY
+        state = self._state(bucket)
+        if not isinstance(state.last_speed, dict):
+            return
+        merged = dict(state.last_speed)
+        merged.update(updates)
+        state.last_speed = merged
         self._save_session_state(key=bucket)
 
     def speed_stats(self, key: str | None = None) -> dict[str, Any]:
@@ -294,16 +325,22 @@ class SessionStoreMixin:
         # 复用纯函数的平均口径，避免 store 与 token_speed 各写一份除式而悄悄漂移。
         agg = SpeedAggregate(
             samples=state.speed_samples,
-            prefill_tps_sum=state.speed_prefill_tps_sum,
-            decode_tps_sum=state.speed_decode_tps_sum,
-            ttft_s_sum=state.speed_ttft_s_sum,
-            decode_s_sum=state.speed_decode_s_sum,
+            prompt_rate_sum=state.speed_prompt_rate_sum,
+            decode_rate_sum=state.speed_decode_rate_sum,
+            reply_tokens_sum=state.speed_reply_tokens_sum,
+            growth_seconds_sum=state.speed_growth_seconds_sum,
+            prompt_tokens_sum=state.speed_prompt_tokens_sum,
+            ttft_seconds_sum=state.speed_ttft_s_sum,
         )
         return {
             "samples": agg.samples,
             "last": state.last_speed,
-            "prefill_tps_avg": agg.prefill_tps_avg,
-            "decode_tps_avg": agg.decode_tps_avg,
+            # 平均单次速度（每请求等权）
+            "mean_prompt_rate_est_tps": agg.mean_prompt_rate_est_tps,
+            "mean_decode_tps_est": agg.mean_decode_tps_est,
+            # 整体聚合吞吐率（长请求加权）
+            "aggregate_decode_tps_est": agg.aggregate_decode_tps_est,
+            "aggregate_prompt_rate_est_tps": agg.aggregate_prompt_rate_est_tps,
             "ttft_s_avg": agg.ttft_s_avg,
             "decode_s_avg": agg.decode_s_avg,
         }
