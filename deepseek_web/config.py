@@ -124,6 +124,11 @@ CONTINUE_BUTTON_TEXTS = [
 # 上游超时的最大尝试次数与退避基数（秒）
 MAX_UPSTREAM_RETRIES = env_int("DEEPSEEK_RETRIES", 2)
 RETRY_BACKOFF_S = env_float("RETRY_BACKOFF_S", 1.0)
+# 坏结构重发（见 doc/toolcall_retry.md）：声明了 tools 但回复里的 tool_call 结构
+# 损坏（空围栏 / 截断 / 语法错 / 裸标记）时，在同一会话里补一句提示词让模型重发。
+# 独立于上游超时重试（MAX_UPSTREAM_RETRIES）的计数；0 = 关闭（坏文本原样返回，
+# 仅用于排查，不建议常态关闭）。
+MALFORMED_RETRIES = env_int("MALFORMED_RETRIES", 2)
 
 
 # ==================== 输入框写入 / 提交（长 prompt 防卡死）====================

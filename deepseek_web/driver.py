@@ -30,6 +30,7 @@ from .errors import (  # noqa: F401  (re-export)
     DeepSeekContextLimitError,
     DeepSeekPageLostError,
     DeepSeekTimeoutError,
+    MalformedToolCallError,
 )
 from .models import ChatMessage
 from .page_pool import PagePoolMixin

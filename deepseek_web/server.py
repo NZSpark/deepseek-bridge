@@ -18,6 +18,7 @@ from .driver import (
     DeepSeekContextLimitError,
     DeepSeekTimeoutError,
     DeepSeekWebDriver,
+    MalformedToolCallError,
 )
 from .models import (
     ChatCompletionRequest,
@@ -31,6 +32,7 @@ from .models import (
 from .prompting import build_prompt, estimate_tokens, extract_images
 from .responses import ResponsesRequest, handle_responses
 from .streaming import _stream_bridge_reply, _stream_chat_completion
+from .toolcall_retry import complete_with_toolcall_retry
 from .toolcalls import _tool_names, parse_tool_calls, to_tool_call_models
 
 driver = DeepSeekWebDriver()
@@ -501,9 +503,17 @@ async def chat_completions(
     images = []
     if config.IMAGE_PASTE_ENABLED:
         images = extract_images(request.messages, only_delta=True)[: config.IMAGE_PASTE_MAX]
+    wants_tools = bool(request.tools) and request.tool_choice != "none"
+    valid_names = _tool_names(request.tools)
     try:
-        reply_content, _code_blocks = await driver.send_chat(
-            prompt, seeded_prompt=seeded_prompt, key=session_key, images=images
+        reply_content, _code_blocks = await complete_with_toolcall_retry(
+            driver,
+            prompt,
+            seeded_prompt=seeded_prompt,
+            key=session_key,
+            images=images,
+            wants_tools=wants_tools,
+            valid_names=valid_names,
         )
     except DeepSeekContextLimitError as exc:
         print("\n[ERR] 网页会话已达上下文长度上限:")
@@ -517,6 +527,10 @@ async def chat_completions(
         print("\n[ERR] 等待 DeepSeek 回复超时（已重试）:")
         traceback.print_exc()
         return _error_response(504, str(exc), "timeout")
+    except MalformedToolCallError as exc:
+        # 上游给了回复但 tool_call 坏且重发耗尽：上游质量问题，客户端可重试。
+        print(f"\n[重发] 坏结构重发耗尽: {exc}")
+        return _error_response(502, str(exc), "upstream_error")
     except RuntimeError as exc:
         # 浏览器不可用 / 找不到输入框等上游问题
         print("\n[ERR] 上游浏览器不可用:")
@@ -530,8 +544,7 @@ async def chat_completions(
     # usage 用真正发出去的 prompt 估算（driver 可能选了播种版 / 中途轮转过）。
     # 按会话桶读取，并发时不会拿到别的 Agent 的 prompt；回退到预判值兼容假 driver。
     sent_prompt = driver.sent_prompt(session_key) or prompt
-    wants_tools = bool(request.tools) and request.tool_choice != "none"
-    tool_calls = parse_tool_calls(reply_content, _tool_names(request.tools)) if wants_tools else []
+    tool_calls = parse_tool_calls(reply_content, valid_names) if wants_tools else []
 
     if tool_calls:
         return ChatCompletionResponse(

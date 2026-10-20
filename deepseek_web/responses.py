@@ -22,9 +22,11 @@ from .driver import (
     DeepSeekBusyError,
     DeepSeekContextLimitError,
     DeepSeekTimeoutError,
+    MalformedToolCallError,
 )
 from .models import ChatCompletionRequest, ChatMessage, ToolCall
 from .prompting import build_prompt, estimate_tokens, extract_images
+from .toolcall_retry import complete_with_toolcall_retry
 from .toolcalls import _tool_names, parse_tool_calls
 
 # ==================== 请求模型（宽松接收）====================
@@ -289,14 +291,18 @@ async def run_chat(
     images = []
     if config.IMAGE_PASTE_ENABLED:
         images = extract_images(request.messages, only_delta=True)[: config.IMAGE_PASTE_MAX]
-    reply, blocks = await driver.send_chat(
+    valid_names = _tool_names(request.tools)
+    reply, blocks = await complete_with_toolcall_retry(
+        driver,
         prompt,
         on_delta=on_delta,
         seeded_prompt=seeded_prompt,
         key=session_key,
         images=images,
+        wants_tools=wants_tools,
+        valid_names=valid_names,
     )
-    tool_calls = parse_tool_calls(reply, _tool_names(request.tools)) if wants_tools else []
+    tool_calls = parse_tool_calls(reply, valid_names) if wants_tools else []
     sent_prompt = driver.sent_prompt(session_key) or prompt
     return reply, blocks, tool_calls, sent_prompt
 

@@ -26,6 +26,14 @@ class DeepSeekPageLostError(RuntimeError):
     """
 
 
+class MalformedToolCallError(RuntimeError):
+    """声明了工具、但网页端把 tool_call 生成坏且重发耗尽（见 doc/toolcall_retry.md）。
+
+    与「上游出错」区分：上游确实给了回复，只是回复里的调用结构坏、重发也救不回来。
+    映射成 HTTP 502 / SSE ``upstream_error``（上游质量问题，客户端可重试）。
+    """
+
+
 class DeepSeekBusyError(RuntimeError):
     """某个会话桶正忙（同一会话已有请求在跑且等待超时）。
 

@@ -105,6 +105,35 @@ def format_tool_call_emphasis() -> str:
     )
 
 
+# 全角 -> ASCII 映射（网页端会把 JSON 里的引号/冒号/逗号渲染成全角）。
+# 判据层（malformed.py）与解析层共用这一张表，否则会出现「解析层能读、判据判坏」。
+_FULLWIDTH_MAP = str.maketrans(
+    {
+        "\uff1a": ":",  # ：
+        "\uff0c": ",",  # ，
+        "\uff02": '"',  # ＂
+        "\u201c": '"',  # “
+        "\u201d": '"',  # ”
+        "\u2018": "'",  # ‘
+        "\u2019": "'",  # ’
+        "\uff5b": "{",  # ｛
+        "\uff5d": "}",  # ｝
+        "\uff3b": "[",  # ［
+        "\uff3d": "]",  # ］
+    }
+)
+
+
+def _normalize_json_text(text: str) -> str:
+    """把 JSON 文本里的全角标点归一成 ASCII（网页端渲染兜底）。
+
+    只映射结构性标点（括号/引号/冒号/逗号），**不碰正文内容**——冒号或逗号在
+    字符串值里也可能出现，但那些位置归一后仍是合法 JSON 的一部分（字符串里的
+    逗号本就不需要转义）。判据与解析层都必须调用它，保证口径一致。
+    """
+    return text.translate(_FULLWIDTH_MAP)
+
+
 def _normalize_tool_entry(entry: Any) -> dict[str, Any] | None:
     if not isinstance(entry, dict):
         return None
@@ -268,7 +297,11 @@ def parse_tool_calls(text: str, valid_names: set | None = None) -> list[dict[str
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
-            return
+            # 全角渲染兜底：与 malformed 判据共用同一张映射。
+            try:
+                data = json.loads(_normalize_json_text(raw))
+            except json.JSONDecodeError:
+                return
         if isinstance(data, dict) and isinstance(data.get("tool_calls"), list):
             entries = data["tool_calls"]
         elif isinstance(data, dict) and isinstance(data.get("tool_uses"), list):

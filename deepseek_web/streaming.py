@@ -8,10 +8,16 @@ import uuid
 from typing import Any
 
 from . import config
-from .driver import DeepSeekBusyError, DeepSeekContextLimitError, DeepSeekTimeoutError
+from .driver import (
+    DeepSeekBusyError,
+    DeepSeekContextLimitError,
+    DeepSeekTimeoutError,
+    MalformedToolCallError,
+)
 from .models import ChatCompletionRequest
 from .prompting import estimate_tokens, extract_images
 from .token_speed import TokenSpeed, apply_stream_timing
+from .toolcall_retry import complete_with_toolcall_retry
 from .toolcalls import _tool_names, parse_tool_calls
 
 #: SSE 合成流的分帧大小：客户端看到的「增量」就是这个粒度的切片。
@@ -164,13 +170,18 @@ async def _stream_chat_completion(
 
     async def runner():
         try:
-            # 需要工具时先缓冲（等解析出 tool_calls 再决定输出形态），因此不实时吐字
-            reply, blocks = await driver.send_chat(
+            # 需要工具时先缓冲（等解析出 tool_calls 再决定输出形态），因此不实时吐字。
+            # 坏结构重发在本函数内完成：工具模式下 on_delta 为空、尚未吐出任何增量，
+            # 因此重发对客户端不可见（不会看到两段内容）。
+            reply, blocks = await complete_with_toolcall_retry(
+                driver,
                 prompt,
                 on_delta=None if wants_tools else on_delta,
                 seeded_prompt=seeded_prompt,
                 key=session_key,
                 images=images,
+                wants_tools=wants_tools,
+                valid_names=_tool_names(request.tools),
             )
             await queue.put(("done", (reply, blocks, None, None)))
         except DeepSeekContextLimitError as exc:
@@ -187,6 +198,10 @@ async def _stream_chat_completion(
             print("\n[ERR] 等待 DeepSeek 回复超时（已重试）:")
             traceback.print_exc()
             await queue.put(("done", (None, [], str(exc), "timeout")))
+        except MalformedToolCallError as exc:
+            # 上游给了回复但 tool_call 坏且重发耗尽：上游质量问题，客户端可重试。
+            print(f"\n[重发] 坏结构重发耗尽: {exc}")
+            await queue.put(("done", (None, [], str(exc), "upstream_error")))
         except Exception as exc:  # noqa: BLE001
             traceback.print_exc()
             await queue.put(("done", (None, [], str(exc), "server_error")))
