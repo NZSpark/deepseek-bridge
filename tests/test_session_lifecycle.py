@@ -314,7 +314,7 @@ class SessionStateTests(SessionTestCase):
         self.assertAlmostEqual(stats["mean_prompt_rate_est_tps"], 1100.0)
         self.assertAlmostEqual(stats["mean_decode_tps_est"], 55.0)
         self.assertAlmostEqual(stats["ttft_s_avg"], 3.5)
-        # 整体聚合吞吐率 = (400+600)/(8+10)
+        # 整体聚合吞吐率：总 token 数除以总时长，即 (400+600)/(8+10)
         self.assertAlmostEqual(stats["aggregate_decode_tps_est"], 1000 / 18)
         # 落盘只含数值和与最近一轮数值快照，不含任何对话正文
         raw = self._tmp.read_text(encoding="utf-8")

@@ -119,7 +119,7 @@ def _patch_stream_timing(driver, session_key, started_at, first_content_at, done
             },
             key=session_key,
         )
-    except Exception:  # noqa: BLE001 计时补丁失败不得影响正常响应
+    except Exception:  # noqa: BLE001, S110 计时补丁失败不得影响正常响应
         pass
 
 

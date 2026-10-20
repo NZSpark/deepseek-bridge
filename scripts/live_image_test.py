@@ -6,7 +6,6 @@
 需要本地服务已在 127.0.0.1:8000 运行（且运行的是含图片支持的新代码）。
 """
 
-import asyncio
 import base64
 import json
 import sys
@@ -39,7 +38,8 @@ def call(messages, timeout=180):
     req = urllib.request.Request(
         URL, data=body, headers={"Content-Type": "application/json"}
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    # URL 是下方写死的本地常量，不存在用户可控 scheme。
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
         return json.loads(resp.read().decode())
 
 
@@ -67,7 +67,7 @@ def main():
         reply_a = out_a["choices"][0]["message"]["content"]
         print("网页版回复：\n" + reply_a)
         print(f"\nusage: {out_a.get('usage')}")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 冒烟脚本：任何失败都打印并以非零退出
         print(f"[失败] {type(exc).__name__}: {exc}")
         return 1
 
@@ -80,7 +80,7 @@ def main():
         out_b = call(msg_b)
         reply_b = out_b["choices"][0]["message"]["content"]
         print("网页版回复：\n" + reply_b)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 同上
         print(f"[失败] {type(exc).__name__}: {exc}")
         return 1
 
@@ -88,7 +88,11 @@ def main():
     print("\n" + "=" * 60)
     print("判定")
     print("=" * 60)
-    blind = any(k in reply_a for k in ["我看不到图片", "无法看到图片", "看不到图片", "没有收到图片", "只收到", "无法查看图片"])
+    blind_markers = [
+        "我看不到图片", "无法看到图片", "看不到图片",
+        "没有收到图片", "只收到", "无法查看图片",
+    ]
+    blind = any(k in reply_a for k in blind_markers)
     if blind:
         print("结果：❌ 模型表示看不到图片——图片 paste 很可能没有生效。")
     elif reply_a.strip() == reply_b.strip():

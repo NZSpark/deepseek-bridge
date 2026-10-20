@@ -163,9 +163,9 @@ class SpeedAggregateTests(unittest.TestCase):
         agg = aggregate_speed(agg, self._speed(2.0, 1.0))   # 2 tok / 1s
         agg = aggregate_speed(agg, self._speed(2.0, 9.0))   # 2 tok / 9s
         self.assertEqual(agg.samples, 2)
-        # 平均单次 = (2/1 + 2/9) / 2
+        # 平均单次：两轮速率之和除以样本数，即 (2/1 + 2/9) / 2
         self.assertAlmostEqual(agg.mean_decode_tps_est, (2 / 1 + 2 / 9) / 2)
-        # 整体吞吐 = (2+2) / (1+9)
+        # 整体吞吐：总 token 数除以总时长，即 (2+2) / (1+9)
         self.assertAlmostEqual(agg.aggregate_decode_tps_est, 4 / 10)
 
     def test_aggregate_does_not_mutate_receiver(self):

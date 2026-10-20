@@ -22,7 +22,6 @@ from .driver import (
     DeepSeekBusyError,
     DeepSeekContextLimitError,
     DeepSeekTimeoutError,
-    MalformedToolCallError,
 )
 from .models import ChatCompletionRequest, ChatMessage, ToolCall
 from .prompting import build_prompt, estimate_tokens, extract_images

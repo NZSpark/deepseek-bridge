@@ -8,6 +8,7 @@
   * 短回复 / 短窗口 / 重写等样本带 ``quality_flags``，聚合时剔除。
 """
 
+import math
 from dataclasses import asdict, dataclass, field
 
 from .prompting import estimate_tokens
@@ -31,7 +32,7 @@ class TokenSpeed:
     reply_chars: int = 0
     prompt_tokens_est: int = 0
     reply_tokens_est: int = 0
-    token_count_source: str = "char_estimate"
+    token_count_source: str = "char_estimate"  # noqa: S105 计数来源标签，非密钥
 
     # ---- 观测时长（秒；None = 不可用）----
     page_ttft_observed_s: float | None = None
@@ -138,9 +139,7 @@ def _speed_usable(speed: TokenSpeed) -> bool:
     """该样本能否进入速度聚合（token 与时长都有效、未被判定为不可信）。"""
     if speed.page_decode_tps_est is None:
         return False
-    if any(flag in _INVALID_FOR_SPEED for flag in speed.quality_flags):
-        return False
-    return True
+    return not any(flag in _INVALID_FOR_SPEED for flag in speed.quality_flags)
 
 
 def aggregate_speed(agg: SpeedAggregate, speed: TokenSpeed) -> SpeedAggregate:
@@ -180,17 +179,17 @@ def apply_stream_timing(
     e2e = None
     if started_at is not None and first_content_at is not None:
         delta = first_content_at - started_at
-        if delta == delta and delta >= 0:
+        if not math.isnan(delta) and delta >= 0:
             first_latency = delta
     if first_content_at is not None and done_at is not None:
         delta = done_at - first_content_at
-        if delta == delta and delta >= 0:
+        if not math.isnan(delta) and delta >= 0:
             window = delta
             if speed.reply_tokens_est > 0 and window > 0:
                 effective = speed.reply_tokens_est / window
     if started_at is not None and done_at is not None:
         delta = done_at - started_at
-        if delta == delta and delta >= 0:
+        if not math.isnan(delta) and delta >= 0:
             e2e = delta
     return TokenSpeed(
         **{
@@ -224,7 +223,7 @@ def compute_speed(prompt: str, reply: str, timing: SpeedTiming) -> TokenSpeed:
         if a is None or b is None:
             return None
         delta = a - b
-        if not (delta == delta) or delta < 0:  # NaN 或逆序
+        if math.isnan(delta) or delta < 0:  # NaN 或逆序
             return None
         return delta
 
