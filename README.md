@@ -17,6 +17,7 @@
 - **按任务隔离会话**：显式 `X-DeepSeek-Session` / `user` 字段优先；缺失时按提示词里的**工作目录**自动分桶（两个 Pi 在两个目录里跑各自一条会话，无需配置），再按 `User-Agent` 隔离不同客户端；每个任务独立页面与状态。
 - **流式响应（SSE）**：以 `text/event-stream` 逐字吐出内容，兼容 OpenAI 流式解析器。
 - **模拟 Function Calling**：网页版本身不支持 function calling，本项目通过「提示词注入 + 结构化解析」模拟出 OpenAI 的 `tool_calls` 语义。
+- **坏结构自动重发**：模型偶尔会把 `tool_call` 生成坏（空围栏 / 截断 / JSON 语法错 / 裸标记无 JSON）。桥接层会识别这类坏结构，在同一会话里补一句提示让模型重发（`MALFORMED_RETRIES`，默认 2 次），而不是把畸形调用原样透传给客户端；重发耗尽才返回 502 `upstream_error`。见 [doc/toolcall_retry.md](doc/toolcall_retry.md)。
 - **登录态持久化**：基于 `launch_persistent_context`，登录一次即可长期复用（`user_data/` 目录）。
 - **宽松字段校验**：对客户端发来的未知字段（`temperature`、`reasoning_effort`、内容分片数组等）全量兼容，绝不返回 422。
 - **长 prompt 防卡死**：写入输入框采用「整段 fill 优先 + 分块插入兜底」（长文本逐块写入、可断点续写），提交后验证消息真的发出去了；编辑器重挂载 / 延迟清空时改为读取当前输入框，并用「消息是否已出现在对话区」避免误报。超过 `PROMPT_MAX_CHARS`（默认 48000 < 50K）的 prompt 会在发送前截断并告警。
@@ -28,15 +29,15 @@
 
 | 指标 | 数值 |
 | --- | --- |
-| 生产代码行数（`deepseek_web/` 16 个模块） | **5,672** 行 |
-| 入口文件 `deepseek_api_server.py` | 122 行 |
-| **生产代码合计** | **约 5,794 行** |
-| 测试代码行数（`tests/`，11 个文件） | **4,308** 行 |
-| 测试用例数量 | **307** 个（stdlib `unittest`，全部通过） |
-| 测试 / 生产代码比 | 约 **0.74 : 1** |
-| 最大的单个模块 | `chat_io.py`（1,374 行，浏览器输入 / 提交 / 解析核心） |
-| 提交次数 | 20 次 |
-| 开发周期 | 2026-10-02 ～ 2026-10-08（约 7 天） |
+| 生产代码行数（`deepseek_web/` 19 个模块） | **6,679** 行 |
+| 入口文件 `deepseek_api_server.py` | 123 行 |
+| **生产代码合计** | **约 6,802 行** |
+| 测试代码行数（`tests/`，17 个文件） | **5,171** 行 |
+| 测试用例数量 | **357** 个（stdlib `unittest`，全部通过） |
+| 测试 / 生产代码比 | 约 **0.77 : 1** |
+| 最大的单个模块 | `chat_io.py`（1,469 行，浏览器输入 / 提交 / 解析核心） |
+| 提交次数 | 41 次 |
+| 开发周期 | 2026-10-02 ～ 2026-10-08（首版，约 7 天）；后续维护至 2026-10-21 |
 
 > 统计口径：`wc -l` 行数、`git rev-list --count HEAD` 提交数；测试用例数为 `tests/*.py` 中 `def test_` 的数量。数字随代码演进会变化，更新 README 时请重新核对。
 
@@ -51,6 +52,8 @@
 │   ├── config.py            #   .env 加载 + 全部可调参数（超时 / 重试 / 选择器 / 路径）
 │   ├── models.py            #   OpenAI 兼容的 Pydantic 数据模型
 │   ├── toolcalls.py         #   工具注入与解析（模拟 function calling）
+│   ├── malformed.py         #   坏 tool_call 结构判据（空围栏 / 截断 / 语法错 / 裸标记）
+│   ├── toolcall_retry.py    #   坏结构重发编排（补提示词 + 次数控制）
 │   ├── prompting.py         #   消息数组 -> 网页输入框文本
 │   ├── driver.py            #   Playwright 浏览器 Driver + 会话持久化（Mixin 组装 + 旧路径 re-export）
 │   ├── errors.py            #   驱动层异常与常量（页面失效 / 到顶 / 忙 / 超时）
@@ -75,6 +78,8 @@
 ├── doc/bridge_commands.md   # /bridge 聊天命令的设计、语义与权限取舍
 ├── doc/tokenspeed.md        # /bridge token 的测速口径设计
 ├── doc/e2e_test_design.md   # 真机对等 E2E：判定矩阵 / 开关 / 前置条件
+├── doc/toolcall_retry.md    # 坏 tool_call 结构检测与重发设计
+├── doc/toolcall_retry_tasks.md # 坏结构重发的任务拆分与实现记录
 ├── user_data/               # Chromium 持久化用户目录（保存登录态，勿提交到 git）
 └── .venv/                   # Python 虚拟环境
 ```
@@ -166,7 +171,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | --- | --- | --- |
 | 400 | `invalid_request_error` | 请求不合法（缺 messages 等） |
 | 400 | `context_length_exceeded` | 网页会话已达上下文上限（正常会自动轮转，仍失败时才返回） |
-| 502 | `upstream_error` | 上游浏览器不可用 / 找不到输入框 |
+| 502 | `upstream_error` | 上游浏览器不可用 / 找不到输入框 / 坏 tool_call 结构重发耗尽 |
 | 503 | `unavailable` | 浏览器尚未就绪（未登录或 profile 被占用） |
 | 503 | `upstream_busy` | 同一会话桶已有请求在跑，等锁超过 `BUCKET_LOCK_TIMEOUT_S`（只在该值 >0 时出现） |
 | 504 | `timeout` | 等待网页版回复超时（已按重试阶梯重试过） |
@@ -272,15 +277,17 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 DeepSeek 网页版不支持原生 function calling，本项目采用三步模拟：
 
-1. **注入**：把客户端的 `tools` 描述转成自然语言指令（[`format_tools_instruction`](deepseek_api_server.py)），追加到 prompt 末尾，要求模型用 ```` ```tool_call ```` 代码块回话。
-2. **解析**：从模型回复中解析工具调用（[`parse_tool_calls`](deepseek_api_server.py)）。解析器兼容两种形态：
+1. **注入**：把客户端的 `tools` 描述转成自然语言指令（[`format_tools_instruction`](deepseek_web/toolcalls.py)），追加到 prompt 末尾，要求模型用 ```` ```tool_call ```` 代码块回话。
+2. **解析**：从模型回复中解析工具调用（[`parse_tool_calls`](deepseek_web/toolcalls.py)）。解析器兼容两种形态：
    - 带围栏的 ```` ```tool_call ... ``` ```` 代码块；
    - **无围栏**的 `tool_call` 标签 + 裸 JSON（网页 DOM 提取后的常见形态，代码块被渲染成 `<pre>`，围栏退化为标题文字）。
 
    同时使用平衡括号扫描正确处理字符串与转义，并按合法工具名过滤误报。
+
+   若回复里的调用结构坏到解析不出（空围栏 / JSON 截断 / 语法错 / 只有裸 `tool_call` 标记没有 JSON），[`toolcall_retry`](deepseek_web/toolcall_retry.py) 会判为坏结构并在**同一会话**里补一句提示要求重发，最多 `MALFORMED_RETRIES` 次（默认 2，`0` 关闭）。坏文本不会被当成正常回复透传给客户端；重发耗尽时返回 502 `upstream_error`。见 [doc/toolcall_retry.md](doc/toolcall_retry.md)。
 3. **回填**：下一轮请求中，客户端发回的 `role: "tool"` 执行结果会被拼回 prompt 再喂给网页版。
 
-**会话上下文优化**：网页版本身是持续存在的会话，因此 [`build_prompt`](deepseek_api_server.py) 只发送「最后一条 assistant 消息之后」的新增消息，而非每轮重发全部历史。
+**会话上下文优化**：网页版本身是持续存在的会话，因此 [`build_prompt`](deepseek_web/prompting.py) 只发送「最后一条 assistant 消息之后」的新增消息，而非每轮重发全部历史。
 
 ---
 
@@ -292,6 +299,7 @@ DeepSeek 网页版不支持原生 function calling，本项目采用三步模拟
 - **结束判定**：以「最后一条回复的内容是否变化」判断本轮回复是否出现（**不能用回复节点数量**：长会话下 DeepSeek 会回收/替换节点，数量可能恒定不变，实测恒为 2）。结束后先用页面「生成中」状态收尾，识别不到该控件时退回内容稳定判定（文本相同连续 2 次，或长度不再增长连续 4 次）。
 - **超时**：单轮生成总超时默认 180 秒，可用环境变量 `DEEPSEEK_TIMEOUT` 覆盖（必须小于 Pi 侧 HTTP 客户端的超时，否则客户端会先报错）。若超时前已读到回复内容，会直接返回该内容而**不重发**；只有页面上完全没有产生新回复时才视为发送失败，恢复会话后重试一次。客户端建议设置较长 timeout（`client_test.py` 中为 240s）。
 - **重试**：只有「等待超时」与「会话页面失效」会重试，最多 `DEEPSEEK_RETRIES` 次（默认 2），每次先尝试恢复会话再退避重试；真正找不到输入框（选择器失效 / 页面停在非对话视图）、profile 被占用等属于不可重试，直接返回错误（错误文案里会带上现场信息，便于定位）。
+- **坏 tool_call 重发**：这条链路独立于上面的超时重试，由 `MALFORMED_RETRIES`（默认 2，`0` = 关闭）控制次数。它解决的是「上游确实回了话，但把 `tool_call` 写坏了」——重发提示走同一条网页会话，不会新建会话、也不会丢上下文。关闭后坏文本会原样返回，仅建议排查时使用。
 - **页面自愈**：会话页面的**标签**被关掉 / 渲染进程崩溃 / 被浏览器回收后，服务会自动重建该页面并回到同一条网页会话（状态保留，必要时重新播种），不需要重启进程；默认桶的页面同样会重建。请仍然避免手动关闭自动弹出的 Chromium 窗口（整窗关闭时浏览器上下文就没了）。
 - **无头运行**：已登录过之后可用 `HEADLESS=1` 启动（适合 CI / 无显示环境）；首次登录必须有头模式。
 - **健康检查**：`GET /healthz` 返回浏览器是否就绪、当前会话地址、会话状态（`session`）、在用会话桶（`session_keys`）、分桶开关（`session_scoping` / `session_scoping_by_ua` / `session_scoping_by_cwd`）与初始化错误，便于客户端探活。
@@ -333,7 +341,9 @@ DeepSeek 网页版不支持原生 function calling，本项目采用三步模拟
 .venv/bin/python -m unittest discover -s tests -t . -v
 ```
 
-测试覆盖解析层、结束判定、会话生命周期（播种 / 到顶 / 轮转 / 重试阶梯 / 会话桶 / 页面回收 / 锁）、模块结构、路由层、**Responses API 兼容层**（请求映射 / 响应结构 / 命名 SSE 事件 / 工具调用 / 错误映射），以及 **Bridge 聊天命令**（精确匹配 / 参数与地址校验 / 浏览器未就绪时的只读命令 / 绑定与重新播种的一次性语义）。全部用假 page / 假 driver 驱动，不需要启动浏览器，也不需要额外依赖（只用标准库 unittest）。
+测试覆盖解析层、结束判定、会话生命周期（播种 / 到顶 / 轮转 / 重试阶梯 / 会话桶 / 页面回收 / 锁）、模块结构、路由层、**Responses API 兼容层**（请求映射 / 响应结构 / 命名 SSE 事件 / 工具调用 / 错误映射）、**Bridge 聊天命令**（精确匹配 / 参数与地址校验 / 浏览器未就绪时的只读命令 / 绑定与重新播种的一次性语义），以及 **坏 tool_call 结构检测与重发**（判据边界 / 重发次数 / 耗尽后的错误映射）。全部用假 page / 假 driver 驱动，不需要启动浏览器，也不需要额外依赖（只用标准库 unittest）。
+
+静态检查：`ruff check .` 全仓零告警（`select = ["ALL"]` + 逐条豁免并注明理由，见 `pyproject.toml`）。
 
 ---
 
