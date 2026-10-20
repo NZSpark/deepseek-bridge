@@ -6,6 +6,8 @@
 
 ---
 
+> 设计细节（契约、会话模型、结束判定、错误语义、显式取舍与已知限制）见 **[doc/design.md](doc/design.md)**。
+
 ## ✨ 特性
 
 - **OpenAI 兼容接口**：完整实现 `/v1/models`、`/v1/chat/completions`，并额外提供 `/v1/responses`（OpenAI Responses API，供 **Codex CLI** 使用）；支持 `messages`、`tools`、`stream` 等标准字段；错误也以 OpenAI 兼容的 `error` 结构返回。
@@ -50,18 +52,29 @@
 │   ├── models.py            #   OpenAI 兼容的 Pydantic 数据模型
 │   ├── toolcalls.py         #   工具注入与解析（模拟 function calling）
 │   ├── prompting.py         #   消息数组 -> 网页输入框文本
-│   ├── driver.py            #   Playwright 浏览器 Driver + 会话持久化
+│   ├── driver.py            #   Playwright 浏览器 Driver + 会话持久化（Mixin 组装 + 旧路径 re-export）
+│   ├── errors.py            #   驱动层异常与常量（页面失效 / 到顶 / 忙 / 超时）
+│   ├── page_pool.py         #   页面池：判活 / 重建 / LRU / 空闲回收 / 会话绑定
+│   ├── session_store.py     #   按桶状态与持久化（绑定、播种标记、轮数、测速样本）
+│   ├── chat_io.py           #   输入 / 提交 / 结束判定 / 回复提取（最核心的实现）
+│   ├── completion.py        #   Chat Completions 主流程
 │   ├── streaming.py         #   SSE 流式编码（Chat Completions）
 │   ├── responses.py         #   Responses API 兼容层（Codex CLI 专用，命名 SSE 事件）
+│   ├── tasks.py             #   任务快照（新会话播种 / 重启续跑）
+│   ├── token_speed.py       #   token 速度纯函数（只数值，不含正文）
 │   ├── bridge_commands.py   #   /bridge 聊天命令（识别 / 执行 / 应答）
-│   └── server.py            #   FastAPI 应用与路由
+│   └── server.py            #   FastAPI 应用、分桶与错误映射
 ├── client_test.py           # 使用官方 openai SDK 测试本地服务的示例客户端
 ├── requirements.txt         # 运行时依赖（含 client_test.py 需要的 openai）
 ├── .env.example             # 配置模板（复制为 .env）
 ├── INSTALL.md               # 安装说明
 ├── tests/                   # 解析层、结束判定、会话生命周期、路由层的回归测试（stdlib unittest）
-├── doc/update.md            # 项目改进建议与进度
+├── doc/design.md            # 设计文档：契约 / 会话模型 / 错误语义 / 取舍 / 已知限制
+├── doc/update.md            # 项目改进建议与进度（含故障复盘台账）
+├── doc/acceptance.md        # 验收记录（命令 + 证据 + 未通过项 + 已知限制）
 ├── doc/bridge_commands.md   # /bridge 聊天命令的设计、语义与权限取舍
+├── doc/tokenspeed.md        # /bridge token 的测速口径设计
+├── doc/e2e_test_design.md   # 真机对等 E2E：判定矩阵 / 开关 / 前置条件
 ├── user_data/               # Chromium 持久化用户目录（保存登录态，勿提交到 git）
 └── .venv/                   # Python 虚拟环境
 ```
