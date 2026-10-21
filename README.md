@@ -90,6 +90,17 @@
 
 ### 1. 环境准备
 
+**Windows 11（PowerShell）：**
+
+```powershell
+.\scripts\setup_win11.ps1
+.\.venv\Scripts\Activate.ps1
+```
+
+若 PowerShell 阻止脚本，可先在当前终端运行 `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`，再执行安装脚本。项目需要 Python 3.14 或更新版本。
+
+**macOS / Linux：**
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate

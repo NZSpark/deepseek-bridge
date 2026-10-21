@@ -56,7 +56,7 @@ class SessionState:
         return asdict(self)
 
     @classmethod
-    def from_payload(cls, payload: dict[str, Any]) -> SessionState:
+    def from_payload(cls, payload: dict[str, Any]) -> "SessionState":
         state = cls()
         if not isinstance(payload, dict):
             return state
@@ -423,4 +423,3 @@ class SessionStoreMixin:
         state.linked_url = None
         self._save_session_state(clear_url=True, key=bucket)
         print(f"[会话] 已请求重置 key={bucket} 的会话，下一轮将开启新会话并播种上下文。")
-
