@@ -56,6 +56,63 @@ class UnclosedFenceTests(unittest.TestCase):
         self.assertFalse(has_unclosed_tool_fence(F + "python" + N + "x=1" + N + F))
 
 
+BAR = "\uff5c\uff5c"
+
+
+def dsml(name, extra=""):
+    return f"<{BAR}DSML{BAR} {name}{extra}>"
+
+
+def dsml_close(name):
+    return f"</{BAR}DSML{BAR} {name}>"
+
+
+def dsml_call(name="bash", command="ls"):
+    return N.join([
+        dsml("calls"),
+        dsml("invoke", ' name="bash"'),
+        dsml("parameter", ' name="command" string="true"') + command + dsml_close("parameter"),
+        dsml_close("invoke"),
+        dsml_close("calls"),
+    ])
+
+
+class DsmlMalformedTests(unittest.TestCase):
+    """解析失败的 DSML 也必须要求重发（不能当正常回答交回客户端）。"""
+
+    def test_parsable_dsml_is_ok(self):
+        self.assertFalse(has_no_usable_call(dsml_call()))
+
+    def test_dsml_empty_calls_is_bad(self):
+        text = dsml("calls") + N + dsml_close("calls")
+        self.assertTrue(has_no_usable_call(text))
+
+    def test_dsml_invoke_without_name_is_bad(self):
+        text = dsml("invoke") + N + dsml_close("invoke")
+        self.assertTrue(has_no_usable_call(text))
+
+    def test_dsml_bad_json_body_is_bad(self):
+        # 参数被换行截断：JSON 非法，解析层救不出任何调用
+        body = '{"name": "bash", "arguments": {"command": "cd /x' + N + '&& ls"}}'
+        text = dsml("calls") + N + body + N + dsml_close("calls")
+        self.assertTrue(has_no_usable_call(text))
+
+    def test_dsml_bad_is_malformed_per_segment(self):
+        text = dsml("calls") + N + dsml_close("calls")
+        self.assertTrue(has_malformed_tool_call(text))
+
+    def test_plain_text_mentioning_dsml_is_ok(self):
+        self.assertFalse(has_no_usable_call("这段文本提到 DSML 这个词，但没有标签"))
+
+    def test_truncated_but_parsable_dsml_is_ok(self):
+        # 闭标签缺失，但 invoke/parameter 结构完整，解析层能救 -> 不重发
+        text = N.join([
+            dsml("invoke", ' name="bash"'),
+            dsml("parameter", ' name="command" string="true"') + "ls" + dsml_close("parameter"),
+        ])
+        self.assertFalse(has_no_usable_call(text))
+
+
 class MalformedPerSegmentTests(unittest.TestCase):
     def test_mixed_is_malformed_per_segment(self):
         text = fence('{"name":"a","arguments":{}}') + N + fence("{bad")

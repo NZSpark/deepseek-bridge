@@ -16,7 +16,9 @@ DeepSeek 网页版没有原生 function calling，本项目靠「提示词注入
 - 围栏正文为空（内容被 DOM 吃掉，只剩语言标记）；
 - JSON 被截断 / 语法错（尾逗号、单引号、断在半截键名）；
 - 裸 `tool_call` 标记后面什么都没有；
-- 偶尔退回**原生 DSML 工具 DSL**（`<｜｜DSML｜｜ calls>`），解析层能救一部分，救不了的也是坏。
+- 偶尔退回**原生 DSML 工具 DSL**（`<｜｜DSML｜｜ calls>` / `<｜｜DSML｜｜ invoke>`），
+  解析层能救一部分；救不了的那些（标签对不上、`invoke` 缺 `name`、参数被换行截断成
+  非法 JSON、`calls` 空壳）同样是坏结构，**也必须重发**。
 
 这些坏结构如果原样交给客户端：
 
@@ -75,14 +77,41 @@ DeepSeek 网页版没有原生 function calling，本项目靠「提示词注入
 - JSON 语法错（括号平衡但非法，如 `{bad}`、尾逗号、单引号）；
 - 裸 `tool_call` 标记后面什么都没有。
 
-### 3.3 刻意不看的东西
+### 3.3 DSML 形态：解析层救不出来才算坏
+
+模型退回原生 DSML DSL 时，判据的优先级是「**解析层救得活 → 不重发**」：
+
+| 形态 | 解析层 | 判据 |
+| --- | --- | --- |
+| `invoke` + `parameter` 齐全（闭标签缺失但结构完整） | 救得出 | 不重发 |
+| `<｜｜DSML｜｜ calls></｜｜DSML｜｜ calls>` 空壳 | 救不出 | **重发** |
+| `invoke` 缺 `name` 属性 | 救不出 | **重发** |
+| 参数被换行截断 → JSON 非法 | 救不出 | **重发** |
+| 正文只是**提到**「DSML」这个词，没有标签 | — | 不重发 |
+
+实现口径：
+
+```python
+DSML_CLAIM = re.compile(rf"<\s*/?\s*{BAR}\s*DSML\s*{BAR}\s*(?:calls|invoke)\b", re.I)
+
+# 解析层已在上方 return False；走到这里说明一个调用都没救出来
+return bool(DSML_CLAIM.search(text))
+```
+
+`BAR` 用 `[｜|]{1,4}`，与 `toolcalls.py` 的开标签口径一致（全角竖线、半角竖线、多根都认）。
+
+**为什么不能无条件把 DSML 当损坏**：DSML 是模型退回原生 DSL 的另一种合法表达，
+解析层能读就不是坏结构。若判据不看解析层，会把能执行的调用也判坏、白白重发一次。
+这正是 3.4 与第 6 节强调的「与解析层共用同一口径」的具体落地。
+
+### 3.4 刻意不看的东西
 
 - **普通 `python` / `bash` / `json` 等其它语言围栏**：正常回答里出现代码块是常态，
   把它们判成损坏会导致对每个含代码的回答都重发一次。
 - **工具名是否在 `valid_names` 里**：那是解析层（带 `declared`）的事；判据只看结构。
   名字对不上不算「坏结构」，是「调用了不存在的工具」，交给上层过滤。
 
-### 3.4 围栏未闭合优先（独立结构信号）
+### 3.5 围栏未闭合优先（独立结构信号）
 
 即使某段正文的 JSON **恰好合法**（例如参数为空、恰好在某键值后截断成平衡括号），
 只要存在一个 ` ```tool_call ` 开围栏**没有对应闭合**，整轮就判坏、必须重发。
@@ -97,7 +126,7 @@ DeepSeek 网页版没有原生 function calling，本项目靠「提示词注入
 
 只判 `tool_call` 语言围栏；普通 `python` / `bash` 等代码围栏不参与截断判定。
 
-### 3.5 逐段 vs 整轮
+### 3.6 逐段 vs 整轮
 
 一轮回复可能同时有**多个调用，好坏混杂**。提供两个层次的判据：
 
@@ -174,10 +203,14 @@ async def complete_with_toolcall_retry(...) -> tuple[str, list[dict]]:
 ## 6. 与 DSML 解析的关系
 
 `toolcalls.py` 已经能救大部分 DSML 结构化形态（`_parse_dsml_invokes` 等）。
-**判据只看 ` ```tool_call ` 围栏与裸标记**，不把 DSML 标签当「损坏」——因为：
+**判据不是「见到 DSML 就判坏」，而是「见到 DSML 声称要调用、解析层却一个都救不出」才判坏**：
 
 - DSML 是模型退回原生 DSL 的**另一种合法表达**，解析层能读就不是坏结构；
-- 判据若把 DSML 也算进去，会与解析层的救活能力打架（解析层能读、判据判坏）。
+- 判据若无条件把 DSML 算进去，会与解析层的救活能力打架（解析层能读、判据判坏）；
+- 判据若**完全不看** DSML，则会漏掉「空壳 `calls`」「`invoke` 缺 `name`」
+  「参数被换行截断成非法 JSON」这些真实坏形态——客户端拿到后同样静默死掉。
+
+正确的写法是先问解析层（短路），再问「有没有 DSML 声称」：
 
 只有当**整轮既没有可用 `tool_call` 段、也没有解析层能救的 DSML 调用**时，
 `has_no_usable_call` 才应为 `True`。实现上可在判据里复用解析层：
@@ -185,9 +218,12 @@ async def complete_with_toolcall_retry(...) -> tuple[str, list[dict]]:
 ```
 if parse_tool_calls(text, valid_names):   # 解析层能救出任何调用
     return False                          # 不算坏，交给执行
+...
+return bool(DSML_CLAIM.search(text))      # 声称要调用却一个都没救出 → 重发
 ```
 
-即「**解析层救得活 → 不重发**」是最高优先级的短路。
+即「**解析层救得活 → 不重发**」是最高优先级的短路；短路之后仍见到 DSML 的
+`calls` / `invoke` 标签，就说明这次退回原生 DSL 是**坏的**。
 
 ---
 
@@ -203,7 +239,12 @@ if parse_tool_calls(text, valid_names):   # 解析层能救出任何调用
 | 一轮内「好的 + 坏的」混杂 | `has_no_usable_call=False` | 整轮判据误杀好调用 |
 | 全角渲染的好调用 | `False`（不误判） | 判据不做全角归一 |
 | 普通 `python` 代码块 | `False` | 其它语言围栏被当损坏 |
-| DSML 可解析调用 | `False` | 判据不短路解析层 |
+| DSML 可解析调用 | `False`（不误判） | 判据不短路解析层 |
+| DSML 截断但 `invoke`/`parameter` 完整 | `False`（不误判） | 判据不短路解析层 |
+| DSML `calls` 空壳 | `True` | 判据完全不看 DSML |
+| DSML `invoke` 缺 `name` | `True` | 判据完全不看 DSML |
+| DSML 参数被换行截断成非法 JSON | `True` | 判据完全不看 DSML |
+| 正文只提到「DSML」字样、无标签 | `False` | `DSML_CLAIM` 误匹配普通文本 |
 | 重发后仍坏 | 抛出，不静默 | 静默吞掉 |
 
 ---
@@ -225,3 +266,6 @@ if parse_tool_calls(text, valid_names):   # 解析层能救出任何调用
 - **重发时换会话 / 重放历史**：上下文没丢，换会话是另一套阶梯（`send_chat`）的事。
 - **把 `tool_call` 字样出现在正文里当损坏**：正常讨论会被误伤；只在行首/空白后且
   后面跟着「要么 JSON、要么什么都没有」时才算标记（裸标记口径）。
+- **把「DSML」字样出现在正文里当损坏**：同理，只认 `<…DSML… calls>` / `<…DSML… invoke>`
+  这种**标签**形态（`DSML_CLAIM`），纯文字提及不算。
+- **重发时在提示词里写 DSML 标记**：等于把坏形态示范一遍，见 P0-N。

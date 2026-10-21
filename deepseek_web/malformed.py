@@ -15,6 +15,13 @@ _FENCED = re.compile(r"```[ \t]*(tool_call)[ \t]*\n(.*?)(?:```|\Z)", re.DOTALL |
 # 只匹配开围栏本身，判断是否闭合。语言标记后不要求必须换行（同行/CRLF 都要能命中）。
 TOOL_CALL_OPEN = re.compile(r"```[ \t]*(tool_call)\b(?![0-9A-Za-z_])", re.IGNORECASE)
 
+# DSML 结构化开标签（原生 DSL）。出现即「声称要调用」；解析层救不出来就要重发。
+_DSML_BAR = r"[｜|]{1,4}"
+DSML_CLAIM = re.compile(
+    rf"<\s*/?\s*{_DSML_BAR}\s*DSML\s*{_DSML_BAR}\s*(?:calls|invoke)\b",
+    re.IGNORECASE,
+)
+
 # 裸标记：只在行首/空白后出现才算。
 BARE = re.compile(r"^[ \t]*tool_call\b(?![0-9A-Za-z_])[ \t]*[:：]?[ \t]*(.*)$", re.MULTILINE | re.IGNORECASE)  # noqa: E501 正则单行更易读
 
@@ -93,13 +100,30 @@ def has_no_usable_call(text, valid_names=None):
         saw_marker = True
         if _is_valid_call(b):
             return False
-    return saw_marker
+    if saw_marker:
+        return True
+    # DSML 形态：出现 calls / invoke 标签（声称要调用），但解析层一个调用都救不出来
+    # （参数被换行截断、JSON 不合法、标签对不上……）→ 同样必须重发。
+    # 解析层能救出调用时上面已 return False，所以不会误伤合法的 DSML。
+    return bool(DSML_CLAIM.search(text))
+
+
+def _parse_any(text):
+    """解析层能否从这段文本里救出至少一个调用。"""
+    try:
+        from .toolcalls import parse_tool_calls
+        return bool(parse_tool_calls(text))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def has_malformed_tool_call(text):
     if not text:
         return False
     if has_unclosed_tool_fence(text):
+        return True
+    # DSML 声称要调用却救不出任何调用 → 这段调用本身不可用
+    if DSML_CLAIM.search(text) and not _parse_any(text):
         return True
     if any(not _is_valid_call(m.group(2)) for m in _FENCED.finditer(text)):
         return True
