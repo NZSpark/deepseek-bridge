@@ -36,3 +36,6 @@ Thumbs.db
 
 .pytest_cache/
 .ruff_cache/
+
+# start_all_bridges.sh 的运行日志 / pid 文件
+scripts/logs/
