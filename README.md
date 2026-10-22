@@ -7,6 +7,9 @@
 ---
 
 > 设计细节（契约、会话模型、结束判定、错误语义、显式取舍与已知限制）见 **[doc/design.md](doc/design.md)**。
+>
+> **AI Agent 入口**：所有工具（Pi / Claude Code / Codex）统一从 **[AGENTS.md](AGENTS.md)** 进入——
+> 项目规则、记忆分层、按需加载路由表都在那里；人类读者可看 [doc/harness.md](doc/harness.md)。
 
 ## ✨ 特性
 
