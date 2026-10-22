@@ -350,7 +350,7 @@ class SentPromptIsolationTests(BucketTestCase):
     @staticmethod
     def _stub_send(driver):
         async def fake(prompt, on_delta=None, key=None, **kwargs):
-            return "答案", []
+            return "答案"
 
         driver._send_chat_locked = fake
 
@@ -446,7 +446,7 @@ class ResetTests(BucketTestCase):
 
         async def fake(prompt, on_delta=None, key=None, **kwargs):
             seen.append((prompt, key))
-            return "答案", []
+            return "答案"
 
         driver._send_chat_locked = fake
         asyncio.run(driver.send_chat("DELTA", seeded_prompt="SEEDED", key="task-a"))

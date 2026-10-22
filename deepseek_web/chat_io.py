@@ -49,8 +49,8 @@ class ChatIOMixin:
         seeded_prompt: str | None = None,
         key: str | None = None,
         images: list | None = None,
-    ) -> tuple[str, list[dict]]:
-        """发送单条消息并获取响应。
+    ) -> str:
+        """发送单条消息并获取响应文本。
 
         :param prompt: 增量 prompt（网页会话已有上下文时使用）
         :param seeded_prompt: 带完整历史的“播种”prompt（需要新开会话时使用，
@@ -1105,34 +1105,10 @@ class ChatIOMixin:
         )
         return prompt[:head] + notice + prompt[-tail:]
 
-    async def _extract_code_blocks(self, element) -> list[dict]:
-        """从某条回复的 DOM 节点中提取代码块（语言 + 纯代码文本）。"""
-        extracted: list[dict] = []
-        if element is None:
-            return extracted
-        code_elements = await element.query_selector_all(config.CODE_BLOCK_SELECTOR)
-        for code_el in code_elements:
-            code_tag = await code_el.query_selector(config.CODE_TAG_SELECTOR)
-            lang = "txt"
-            if code_tag:
-                class_attr = await code_tag.get_attribute("class") or ""
-                lang_match = re.search(r"language-(\w+)", class_attr)
-                if lang_match:
-                    lang = lang_match.group(1)
-
-            code_content = await (code_tag or code_el).inner_text()
-            clean_code = re.sub(
-                r"^(?:" + lang + r"|bash|python|json|html|javascript)?\s*(?:Copy|Download)\s*\n",
-                "", code_content, flags=re.IGNORECASE
-            ).strip()
-
-            extracted.append({"lang": lang, "code": clean_code})
-        return extracted
-
     async def _send_chat_locked(self, prompt: str, on_delta=None,
                                 key: str | None = None,
-                                images: list | None = None) -> tuple[str, list[dict]]:
-        """发送单条消息并获取响应及提取的代码块。
+                                images: list | None = None) -> str:
+        """发送单条消息并获取响应文本。
 
         :param on_delta: 可选异步回调，生成过程中实时吐出增量文本（用于 SSE 流式）。
         :param key: 会话桶标识（决定使用哪一条页面）。
@@ -1445,10 +1421,7 @@ class ChatIOMixin:
             )
             print("[测速] " + metric_json)
 
-            # 3. 从最新回复节点中提取代码块
-            extracted_blocks = await self._extract_code_blocks(latest_node)
-
-            # 4. 更新会话状态：已建立历史，并累计体积；超预算则下一轮轮转
+            # 3. 更新会话状态：已建立历史，并累计体积；超预算则下一轮轮转
             state.has_history = True
             # 一次性标记已兑现：``/bridge session reseed`` 只在下一轮重播一次历史
             state.pending_reseed = False
@@ -1466,4 +1439,4 @@ class ChatIOMixin:
             # 成功产生回复后：刷新会话状态（可能刚创建了新会话）并续期页面使用时间
             self._touch_page(bucket)
             await self._remember_session(bucket)
-            return last_text, extracted_blocks
+            return last_text

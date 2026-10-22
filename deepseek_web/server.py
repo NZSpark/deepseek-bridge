@@ -506,7 +506,7 @@ async def chat_completions(
     wants_tools = bool(request.tools) and request.tool_choice != "none"
     valid_names = _tool_names(request.tools)
     try:
-        reply_content, _code_blocks = await complete_with_toolcall_retry(
+        reply_content = await complete_with_toolcall_retry(
             driver,
             prompt,
             seeded_prompt=seeded_prompt,

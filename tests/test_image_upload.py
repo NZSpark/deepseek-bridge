@@ -226,7 +226,7 @@ class SendChatWiresImagesTests(unittest.TestCase):
 
         async def fake_locked(prompt, on_delta=None, key=None, images=None):
             captured["images"] = images
-            return "ok", []
+            return "ok"
 
         async def fake_ensure_page(bucket):
             return None

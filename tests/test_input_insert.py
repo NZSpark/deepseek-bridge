@@ -445,7 +445,7 @@ class SendPathTests(InputTestCase):
         page = FakePage(composer=composer, script=[["答案"], ["答案"]])
         driver = self.driver_for(page)
         prompt = "Q" * 2500
-        text, _ = asyncio.run(driver._send_chat_locked(prompt))
+        text = asyncio.run(driver._send_chat_locked(prompt))
         self.assertEqual(text, "答案")
         self.assertEqual("".join(page.keyboard.inserted), prompt)
         # 提交成功后输入框必须已清空（Enter 被网页接住）

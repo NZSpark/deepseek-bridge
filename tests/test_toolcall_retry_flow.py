@@ -22,14 +22,13 @@ class FakeDriver:
                 self.calls = []
         async def send_chat(self, prompt, on_delta=None, seeded_prompt=None, key=None, images=None):
                 self.calls.append({"prompt": prompt, "images": images})
-                r = self.replies.pop(0)
-                return r, []
+                return self.replies.pop(0)
 
 
 class RetryFlowTests(unittest.IsolatedAsyncioTestCase):
         async def test_bad_then_good_retries_once(self):
                 d = FakeDriver([bad(), good()])
-                text, _blocks = await complete_with_toolcall_retry(d, "p", wants_tools=True)
+                text = await complete_with_toolcall_retry(d, "p", wants_tools=True)
                 self.assertEqual(len(d.calls), 2)
                 self.assertFalse(has_bad(text))
         async def test_retry_has_no_images(self):

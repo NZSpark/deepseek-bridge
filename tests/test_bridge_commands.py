@@ -117,7 +117,7 @@ class FakeDriver:
     async def send_chat(self, prompt, on_delta=None, seeded_prompt=None, key=None,
                         images=None):
         self.chats.append({"prompt": prompt, "key": key, "images": images})
-        return "来自网页版的回复", []
+        return "来自网页版的回复"
 
 
 def call_handle(text, driver=None, bucket=None):
@@ -599,7 +599,7 @@ class DriverBindingTests(SessionTestCase):
         # 落盘后换一个实例读同一份状态：重启 / 并发都不会丢这个一次性标记
         self.assertTrue(self.driver_for(FakePage()).needs_seed("default"))
 
-        text, _ = asyncio.run(driver.send_chat("DELTA", seeded_prompt="SEEDED"))
+        text = asyncio.run(driver.send_chat("DELTA", seeded_prompt="SEEDED"))
         self.assertEqual(text, "答案")
         # 这一轮发的必须是播种版（用户在要求重播历史，而不是只发增量）
         self.assertEqual(driver.sent_prompt(), "SEEDED")

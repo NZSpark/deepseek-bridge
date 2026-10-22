@@ -302,5 +302,4 @@ INPUT_SELECTORS = [
 # 页面就绪（输入框出现）用的选择器
 READY_SELECTOR = env_str("READY_SELECTOR", 'textarea, [contenteditable="true"]')
 # 代码块 DOM
-CODE_BLOCK_SELECTOR = env_str("CODE_BLOCK_SELECTOR", "pre")
-CODE_TAG_SELECTOR = env_str("CODE_TAG_SELECTOR", "code")
+

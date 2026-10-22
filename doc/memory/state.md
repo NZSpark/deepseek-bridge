@@ -1,7 +1,7 @@
 # 当前状态（每次收尾覆盖，保持 < 60 行）
 
-> 摘要：工作区干净，本地与 `origin/main` 同步于 `36c9695`。无进行中任务、无阻塞。
-> 更新于：2026-10-22 · HEAD `36c9695`
+> 摘要：已移除死代码「代码块提取」，接口收敛为纯文本返回；待提交推送。无阻塞。
+> 更新于：2026-10-22 · HEAD `48d41e2`
 
 ## 正在进行
 
@@ -9,7 +9,13 @@
 
 ## 最近完成（按时间倒序）
 
-1. **lint 修复**（commit `36c9695`）：远程 `abdcae9` 引入 ruff UP037（`from_payload` 返回注解带引号），
+1. **移除代码块提取死代码**（本次，未提交）：`_extract_code_blocks`、`CODE_BLOCK_SELECTOR`、`CODE_TAG_SELECTOR`
+   全部删除；`send_chat` / `_send_chat_locked` 返回 `str`，`complete_with_toolcall_retry` 返回 `str`，
+   `responses.run_chat` 返回三元组。提取结果从未被任何客户端消费，属死代码。
+   连带修 10 处测试 fake 的元组返回与 3 处解包；全量 pytest 绿、ruff 干净、harness 14 通过。
+2. **按源码更新记忆**（commit `48d41e2`）：`project.md` 补全 19 个模块 / 7 条路由 / 真实环境变量名，
+   `state.md` 覆盖重写。
+3. **lint 修复**（commit `36c9695`）：远程 `abdcae9` 引入 ruff UP037（`from_payload` 返回注解带引号），
    `--fix` 修掉，行为不变。主干 lint 恢复绿色。
 2. **Agent Harness 落地并推送**（commit `4645054`，rebase 到 `abdcae9` 后推送）：
    `AGENTS.md` 单一事实源 + `CLAUDE.md` / `.codex/instructions.md` 指针、
@@ -29,9 +35,10 @@
 
 ## 下一步（按优先级）
 
-1. 可选：给「闭合块内裸换行」补一条显式回归用例到 `tests/test_malformed.py`。
-2. 可选：`doc/update.md` 已有 340 行复盘，可把通用教训抽到 `lessons.md` 去重。
-3. 可选：`doc/memory/project.md` 的模块行数会随开发漂移，收尾时顺手核对 `wc -l deepseek_web/*.py`。
+1. 提交并推送本次「移除代码块提取」。
+2. 可选：给「闭合块内裸换行」补一条显式回归用例到 `tests/test_malformed.py`（L03 目前无测试钉住）。
+3. 可选：`doc/tasks.md` 其余 `[ ]`（B2.3 错误码、H4 冒烟脚本、H6 验收记录）逐条按源码核实后处理。
+4. 可选：`doc/update.md`（340 行）抽通用教训到 `lessons.md`。
 
 ## 基线（改动前后都应满足）
 

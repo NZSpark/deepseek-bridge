@@ -254,7 +254,7 @@ async def run_chat(
     session_key: str | None,
     on_delta=None,
 ):
-    """执行一次上游对话，返回 (reply, code_blocks, tool_calls, sent_prompt)。
+    """执行一次上游对话，返回 (reply, tool_calls, sent_prompt)。
 
     与 server.py 的 chat 路径共用 driver / prompting / toolcalls，但不改其代码。
 
@@ -264,7 +264,7 @@ async def run_chat(
     command_reply = await bridge_commands.handle_command(request.messages, driver, session_key)
     if command_reply is not None:
         # sent_prompt 记空串：命令没有上游 prompt，不能算成网页版用量
-        return command_reply, [], [], ""
+        return command_reply, [], ""
 
     # 任务快照：记录本轮 messages，轮转播种时用它续接任务（不丢任务目标）。
     bucket = session_key or DEFAULT_SESSION_KEY
@@ -291,7 +291,7 @@ async def run_chat(
     if config.IMAGE_PASTE_ENABLED:
         images = extract_images(request.messages, only_delta=True)[: config.IMAGE_PASTE_MAX]
     valid_names = _tool_names(request.tools)
-    reply, blocks = await complete_with_toolcall_retry(
+    reply = await complete_with_toolcall_retry(
         driver,
         prompt,
         on_delta=on_delta,
@@ -303,7 +303,7 @@ async def run_chat(
     )
     tool_calls = parse_tool_calls(reply, valid_names) if wants_tools else []
     sent_prompt = driver.sent_prompt(session_key) or prompt
-    return reply, blocks, tool_calls, sent_prompt
+    return reply, tool_calls, sent_prompt
 
 
 # ==================== 非流式入口 ====================
@@ -348,7 +348,7 @@ async def handle_responses(
         )
 
     try:
-        reply, _blocks, tool_calls, sent_prompt = await run_chat(chat_req, driver, session_key)
+        reply, tool_calls, sent_prompt = await run_chat(chat_req, driver, session_key)
     except DeepSeekContextLimitError as exc:
         print("\n[ERR] responses: 上下文超限:")
         traceback.print_exc()
@@ -430,15 +430,15 @@ async def stream_responses(
 
     async def runner():
         try:
-            reply, blocks, tool_calls, sent_prompt = await run_chat(
+            reply, tool_calls, sent_prompt = await run_chat(
                 request, driver, session_key,
                 on_delta=None if buffer_tools else on_delta,
             )
-            await queue.put(("done", (reply, blocks, tool_calls, sent_prompt, None, None)))
+            await queue.put(("done", (reply, tool_calls, sent_prompt, None, None)))
         except Exception as exc:  # noqa: BLE001
             traceback.print_exc()
             _status, err_type = _map_exception(exc)
-            await queue.put(("done", (None, [], [], None, str(exc), err_type)))
+            await queue.put(("done", (None, [], None, str(exc), err_type)))
 
     task = asyncio.create_task(runner())
 
@@ -484,7 +484,7 @@ async def stream_responses(
             result = payload
 
     await task
-    reply, _blocks, tool_calls, sent_prompt, error, err_type = result
+    reply, tool_calls, sent_prompt, error, err_type = result
 
     if error:
         yield evt("response.failed", {

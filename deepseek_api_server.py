@@ -22,8 +22,6 @@
 # ---- 配置（快照式重新导出，勿就地改写）----
 from deepseek_web import config
 from deepseek_web.config import (  # noqa: F401
-    CODE_BLOCK_SELECTOR,
-    CODE_TAG_SELECTOR,
     DEBUG,
     FILL_CHUNK_CHARS,
     FILL_RETRIES,

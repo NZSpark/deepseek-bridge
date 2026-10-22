@@ -292,10 +292,9 @@ class SendChatRecoveryTests(PageRecoveryTestCase):
         driver._state("task-a").url = URL_A
         driver._state("task-a").has_history = True
 
-        reply, blocks = asyncio.run(driver.send_chat("继续", key="task-a"))
+        reply = asyncio.run(driver.send_chat("继续", key="task-a"))
 
         self.assertEqual(reply.strip(), "收到")
-        self.assertEqual(blocks, [])
         self.assertTrue(crashed.closed)  # 死页面已被移出并关闭
         self.assertIsNot(driver._page_for("task-a"), crashed)
         self.assertTrue(driver._page_is_alive(driver._page_for("task-a")))
@@ -319,7 +318,7 @@ class SendChatRecoveryTests(PageRecoveryTestCase):
         driver._state(DEFAULT_SESSION_KEY).url = URL_A
         driver._state(DEFAULT_SESSION_KEY).has_history = True
 
-        reply, _ = asyncio.run(driver.send_chat("继续"))
+        reply = asyncio.run(driver.send_chat("继续"))
 
         self.assertEqual(reply.strip(), "收到")
         self.assertTrue(driver._page_is_alive(driver.page))
@@ -343,7 +342,7 @@ class PageReclaimProtectionTests(PageRecoveryTestCase):
                 # 请求正在生成中：另一个桶的惰性建页会顺手回收空闲页面
                 recycled = await driver._recycle_idle_pages()
                 page.release.set()
-                reply, _ = await task
+                reply = await task
                 return recycled, reply
 
         recycled, reply = asyncio.run(scenario())

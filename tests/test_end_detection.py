@@ -123,7 +123,7 @@ class ConstantNodeCountTests(EndDetectionTestCase):
             baseline=["旧答案", "旧答案"],
             script=[["旧答案", "新答案一段"], ["旧答案", "新答案一段"]],
         )
-        text, _ = self.run_chat(self.driver_for(page))
+        text = self.run_chat(self.driver_for(page))
         self.assertEqual(text, "新答案一段")
 
     def test_does_not_resend_prompt(self):
@@ -150,14 +150,14 @@ class StabilityTests(EndDetectionTestCase):
             baseline=["旧"],
             script=[["A"], ["AB"], ["ABC"], ["ABC"], ["ABC"]],
         )
-        text, _ = self.run_chat(self.driver_for(page))
+        text = self.run_chat(self.driver_for(page))
         self.assertEqual(text, "ABC")
 
     def test_same_length_only_needs_more_polls(self):
         # 每轮文本都不同但长度一致：要连续 LEN_STABLE_POLLS 次才收尾
         script = [[t] for t in ["abc12345x", "abd12345y", "abe12345z", "abf12345w"]]
         page = FakePage(baseline=["旧"], script=script)
-        text, _ = self.run_chat(self.driver_for(page))
+        text = self.run_chat(self.driver_for(page))
         self.assertEqual(text, "abf12345w")
 
     def test_unchanged_content_is_not_reported_as_the_reply(self):
@@ -187,7 +187,7 @@ class StabilityTests(EndDetectionTestCase):
 
         driver._send_chat_locked = counting
         with unittest.mock.patch.object(srv.config, "RESPONSE_TIMEOUT_S", 0.05):
-            text, _ = self.run_chat(driver)
+            text = self.run_chat(driver)
         self.assertTrue(text.startswith("ans"))
         self.assertEqual(len(sent), 1)
 
@@ -199,7 +199,7 @@ class GeneratingStateTests(EndDetectionTestCase):
             script=[["答案1"], ["答案2"], ["答案3"], ["答案4"]],
             generating=[True, True, False, False],
         )
-        text, _ = self.run_chat(self.driver_for(page))
+        text = self.run_chat(self.driver_for(page))
         self.assertEqual(text, "答案3")
 
     def test_never_seen_generating_falls_back_to_stability(self):
@@ -208,7 +208,7 @@ class GeneratingStateTests(EndDetectionTestCase):
             script=[["答案"], ["答案"], ["答案"]],
             generating=[None, None, None],
         )
-        text, _ = self.run_chat(self.driver_for(page))
+        text = self.run_chat(self.driver_for(page))
         self.assertEqual(text, "答案")
 
 
@@ -253,7 +253,7 @@ class StreamingDeltaTests(EndDetectionTestCase):
         async def collect(piece):
             pieces.append(piece)
 
-        text, _ = self.run_chat(self.driver_for(page), on_delta=collect)
+        text = self.run_chat(self.driver_for(page), on_delta=collect)
         self.assertEqual("".join(pieces), text)
         self.assertEqual(text, "ABC")
 

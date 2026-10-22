@@ -29,7 +29,7 @@ async def complete_with_toolcall_retry(  # noqa: PLR0913 扁平签名是刻意�
     wants_tools: bool = False,
     valid_names: set | None = None,
 ):
-    """发一轮并（必要时）重发坏结构，返回 ``(reply_text, code_blocks)``。
+    """发一轮并（必要时）重发坏结构，返回 ``reply_text``。
 
     :param driver: 具备 ``send_chat(prompt, on_delta=, seeded_prompt=, key=, images=)``
                    的对象（真实 driver 或测试替身）。
@@ -42,17 +42,16 @@ async def complete_with_toolcall_retry(  # noqa: PLR0913 扁平签名是刻意�
 
     重发耗尽仍坏 → 抛 :class:`MalformedToolCallError`（如实失败，不静默吞掉）。
     """
-    result = await driver.send_chat(
+    text = await driver.send_chat(
         prompt,
         on_delta=on_delta,
         seeded_prompt=seeded_prompt,
         key=key,
         images=images,
     )
-    text, blocks = result
 
     if not wants_tools:
-        return text, blocks
+        return text
 
     retries = 0
     max_retries = max(0, int(getattr(config, "MALFORMED_RETRIES", 0)))
@@ -63,7 +62,7 @@ async def complete_with_toolcall_retry(  # noqa: PLR0913 扁平签名是刻意�
         if backoff > 0:
             await asyncio.sleep(backoff * retries)
         # 重试轮：纯提示词、不带 images、不换会话。
-        text, blocks = await driver.send_chat(RETRY_PROMPT, key=key)
+        text = await driver.send_chat(RETRY_PROMPT, key=key)
 
     if has_no_usable_call(text, valid_names):
         raise MalformedToolCallError(
@@ -71,4 +70,4 @@ async def complete_with_toolcall_retry(  # noqa: PLR0913 扁平签名是刻意�
             f"已重发 {retries} 次仍无可用调用。可稍后重试。"
         )
 
-    return text, blocks
+    return text

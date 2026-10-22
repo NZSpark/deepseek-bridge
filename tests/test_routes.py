@@ -79,7 +79,7 @@ class FakeDriver:
         self.last_prompt = prompt
         if self.error is not None:
             raise self.error
-        return self.reply, []
+        return self.reply
 
     def sent_prompt(self, key=None):
         return self.last_prompt
@@ -297,7 +297,7 @@ class CompletionShapeTests(RouteTestCase):
         async def long_send_chat(prompt, on_delta=None, seeded_prompt=None, key=None,
                                 images=None):
             self.fake.last_prompt = "上下文 " * 500
-            return self.fake.reply, []
+            return self.fake.reply
 
         original = self.fake.send_chat
         self.fake.send_chat = long_send_chat

@@ -179,7 +179,7 @@ class SeedingTests(SessionTestCase):
         driver = self.driver_for(page)
         driver.session_has_history = False
         prompt, seeded = "DELTA", "SEEDED"
-        text, _ = asyncio.run(driver.send_chat(prompt, seeded_prompt=seeded))
+        text = asyncio.run(driver.send_chat(prompt, seeded_prompt=seeded))
         self.assertEqual(text, "答案")
         self.assertEqual(driver.session_has_history, True)
         # 新会话 -> 实际发出的是播种版，sent_prompt 必须如实记录（usage 用它估算）
@@ -416,7 +416,7 @@ class RetryLadderTests(SessionTestCase):
             state["n"] += 1
             if state["n"] <= failures:
                 raise DeepSeekTimeoutError("boom")
-            return "答案", []
+            return "答案"
 
         driver._send_chat_locked = fake
         return driver, prompts
@@ -453,7 +453,7 @@ class RetryLadderTests(SessionTestCase):
             state["n"] += 1
             if state["n"] == 1:
                 raise DeepSeekContextLimitError("cap")
-            return "答案", []
+            return "答案"
 
         driver._send_chat_locked = fake
         with unittest.mock.patch.object(config, "MAX_UPSTREAM_RETRIES", 3):
@@ -543,7 +543,7 @@ class StreamingErrorTypeTests(SessionTestCase):
             async def send_chat(self, prompt, on_delta=None, seeded_prompt=None, **kwargs):
                 if on_delta:
                     await on_delta("答")
-                return "答案", []
+                return "答案"
 
         out = "".join(self._drain(_stream_chat_completion(self._request(), "p", OkDriver(), "s")))
         self.assertIn('"finish_reason": "stop"', out)

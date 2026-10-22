@@ -46,7 +46,7 @@ class FakeDriver:
         if on_delta is not None:
             for i in range(0, len(self.reply), 2):
                 await on_delta(self.reply[i:i + 2])
-        return self.reply, []
+        return self.reply
 
     def sent_prompt(self, key=None):
         return self.last_prompt

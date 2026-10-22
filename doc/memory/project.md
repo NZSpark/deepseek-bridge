@@ -22,9 +22,9 @@
 | 路径 | 行数 | 职责 |
 | --- | --- | --- |
 | `deepseek_api_server.py` | — | 入口薄封装，重新导出配置 + `uvicorn.run` |
-| `deepseek_web/config.py` | 306 | 全部可调参数（`.env` 加载），**运行期唯一取值来源** |
+| `deepseek_web/config.py` | 305 | 全部可调参数（`.env` 加载），**运行期唯一取值来源** |
 | `deepseek_web/server.py` | 579 | FastAPI 路由装配、lifespan、健康检查 |
-| `deepseek_web/chat_io.py` | 1469 | 浏览器输入 / 提交 / 解析核心（最大模块） |
+| `deepseek_web/chat_io.py` | 1442 | 浏览器输入 / 提交 / 解析核心（最大模块） |
 | `deepseek_web/bridge_commands.py` | 625 | 对话内 `/bridge ...` 命令：查状态、管理当前会话桶 |
 | `deepseek_web/responses.py` | 579 | `/v1/responses`（Codex 用），keepalive + 工具缓冲 |
 | `deepseek_web/page_pool.py` | 429 | 页面池与并发锁（mixin，从 driver 拆出） |
@@ -38,7 +38,7 @@
 | `deepseek_web/driver.py` | 176 | Playwright Driver 装配（混入上述 mixin） |
 | `deepseek_web/malformed.py` | 136 | 坏结构判据 |
 | `deepseek_web/models.py` | 129 | OpenAI 兼容 Pydantic 模型 |
-| `deepseek_web/toolcall_retry.py` | 74 | 坏结构重发循环 |
+| `deepseek_web/toolcall_retry.py` | 73 | 坏结构重发循环 |
 | `deepseek_web/errors.py` | 48 | Driver 层异常与常量（防循环依赖） |
 | `tests/` | — | 不联网、不启浏览器的回归用例；`tests/e2e/` 契约测试 |
 | `doc/` | — | 设计 / 施工图 / 验收 / 记忆 |
