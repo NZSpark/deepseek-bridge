@@ -56,7 +56,7 @@ class SessionState:
         return asdict(self)
 
     @classmethod
-    def from_payload(cls, payload: dict[str, Any]) -> "SessionState":
+    def from_payload(cls, payload: dict[str, Any]) -> SessionState:
         state = cls()
         if not isinstance(payload, dict):
             return state
