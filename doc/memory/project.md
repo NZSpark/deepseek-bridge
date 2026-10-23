@@ -56,6 +56,18 @@ scripts/start_all_bridges.sh status          # 所有 bridge 状态
 
 Windows 11 用 `scripts/setup_win11.ps1` 建 venv 并装依赖（见 README）。
 
+## 关键返回形状（改动前先 grep 全库调用点）
+
+| 函数 | 返回 |
+| --- | --- |
+| `driver.send_chat(...)` | `str` |
+| `driver._send_chat_locked(...)` | `str` |
+| `complete_with_toolcall_retry(...)` | `str` |
+| `responses.run_chat(...)` | `(reply, tool_calls, sent_prompt)` 三元组 |
+
+流式队列载荷统一为 `("done", (reply, error, error_type))`，正常与全部 except 分支同形。
+详见 lessons L08。
+
 ## 接口
 
 - `POST /v1/chat/completions`、`POST /v1/responses`、`GET /v1/models`

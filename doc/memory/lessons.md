@@ -54,3 +54,22 @@
 - 根因：前一次 write/edit 已改过该区域，oldText 是改前的。
 - 判据：报错指向的行号附近内容与 oldText 不完全相同（空白/换行差异也算）。
 - 防复发：多处编辑用一次 edit call 的多个 entries（都基于原始文件匹配），或先 read 确认。
+
+## L08 · 改函数返回形状必须全库扫调用点，测试用假对象会掩盖
+
+- 症状：`complete_with_toolcall_retry` 从返回 `(reply, blocks)` 改为只返回 `reply`，
+  测试全绿、已提交，线上每个流式请求却崩 `ValueError: too many values to unpack`。
+- 根因（两层）：
+  1. 只 grep 了 `tests/` 找调用点，漏掉 `deepseek_web/streaming.py` 这个同包内部调用点；
+  2. 相关测试用假 driver 直接返回值，`_stream_chat_completion` 的**真实**解包路径
+     从未被执行，形状不一致时测试仍是绿的。
+- 伴生 bug：改正常分支的 queue 载荷为 3 元组，却漏改 5 个 `except` 分支的 4 元组，
+  消费端解包失败 —— 只在异常路径触发，跑正常用例永远看不见。
+- 判据：`grep -rn 'func_name(' deepseek_web/ tests/` 有任一未同步的调用点；
+  或测试里出现 `driver` 假对象直接返回新旧两种形状都「能过」的情况。
+- 防复发：
+  1. 改签名先全库扫：`grep -rn 'func_name(' deepseek_web/ tests/ --include=*.py`，
+     不要只搜测试目录；
+  2. 返回形状类改动必须有一条**不 mock 该函数**的测试（让真实解包跑一遍）；
+  3. 同一数据结构有多个生产点（正常分支 + 各 except 分支）时，逐个核对元组长度；
+  4. 报「测试全绿」前必须真的跑一次全量，而不是只跑新增用例。
