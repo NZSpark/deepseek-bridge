@@ -549,6 +549,59 @@ class StreamingErrorTypeTests(SessionTestCase):
         self.assertIn('"finish_reason": "stop"', out)
         self.assertIn("data: [DONE]", out)
 
+    def test_stream_path_survives_retry_helper_return_shape(self):
+        """流式路径必须能消费 complete_with_toolcall_retry 的返回值。
+
+        回归：删掉代码块提取后，该函数从返回 ``(reply, blocks)`` 改为只返回
+        ``reply``，但 streaming.py 的解包没同步，真实请求必崩
+        ``ValueError: too many values to unpack``。
+
+        关键点：这里**不 mock** ``complete_with_toolcall_retry``，让真实实现
+        跑一遍解包 —— mock 掉它就会重新掩盖这类返回形状不一致。
+        """
+        from deepseek_web.streaming import _stream_chat_completion
+
+        class TextDriver:
+            async def send_chat(self, prompt, on_delta=None, seeded_prompt=None, **kwargs):
+                return "纯文本回复"
+
+        out = "".join(
+            self._drain(_stream_chat_completion(self._request(), "p", TextDriver(), "s"))
+        )
+        self.assertIn("纯文本回复", out)
+        self.assertIn('"finish_reason": "stop"', out)
+        self.assertIn("data: [DONE]", out)
+        self.assertNotIn("server_error", out)
+
+    def test_stream_path_with_tools_parses_calls(self):
+        """工具模式（wants_tools=True）同样走真实 retry helper，并解析出 tool_calls。
+
+        这是线上日志里 ``工具模式=True`` 的路径：它与纯文本路径共用同一处解包，
+        但额外的 ``valid_names`` / ``wants_tools`` 参数容易让签名漂移而无人察觉。
+        """
+        from deepseek_web.streaming import _stream_chat_completion
+
+        reply = '```tool_call\n{"name": "read", "arguments": {"path": "a.txt"}}\n```'
+
+        class ToolDriver:
+            async def send_chat(self, prompt, on_delta=None, seeded_prompt=None, **kwargs):
+                return reply
+
+        request = self._request(
+            tools=[{
+                "type": "function",
+                "function": {"name": "read", "parameters": {"type": "object"}},
+            }],
+            tool_choice="auto",
+        )
+        out = "".join(
+            self._drain(_stream_chat_completion(request, "p", ToolDriver(), "s"))
+        )
+        self.assertIn('"tool_calls"', out)
+        self.assertIn("read", out)
+        self.assertIn("data: [DONE]", out)
+        self.assertNotIn("server_error", out)
+
 
 if __name__ == "__main__":
     unittest.main()

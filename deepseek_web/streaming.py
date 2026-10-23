@@ -173,7 +173,7 @@ async def _stream_chat_completion(
             # 需要工具时先缓冲（等解析出 tool_calls 再决定输出形态），因此不实时吐字。
             # 坏结构重发在本函数内完成：工具模式下 on_delta 为空、尚未吐出任何增量，
             # 因此重发对客户端不可见（不会看到两段内容）。
-            reply, blocks = await complete_with_toolcall_retry(
+            reply = await complete_with_toolcall_retry(
                 driver,
                 prompt,
                 on_delta=None if wants_tools else on_delta,
@@ -183,28 +183,28 @@ async def _stream_chat_completion(
                 wants_tools=wants_tools,
                 valid_names=_tool_names(request.tools),
             )
-            await queue.put(("done", (reply, blocks, None, None)))
+            await queue.put(("done", (reply,  None, None)))
         except DeepSeekContextLimitError as exc:
             # 给客户端一个可区分的类型，而不是笼统的 server_error
             print("\n[ERR] 网页会话已达上下文长度上限:")
             traceback.print_exc()
-            await queue.put(("done", (None, [], str(exc), "context_length_exceeded")))
+            await queue.put(("done", (None, str(exc), "context_length_exceeded")))
         except DeepSeekBusyError as exc:
             # 本地排队保护：同一会话桶已有请求在跑且等锁超时，对应 HTTP 503 / upstream_busy
             print(f"\n[繁忙] {exc}")
-            await queue.put(("done", (None, [], str(exc), "upstream_busy")))
+            await queue.put(("done", (None, str(exc), "upstream_busy")))
         except DeepSeekTimeoutError as exc:
             # 与 server.py 的非流式分支保持一致：超时是 504/timeout，而不是 500
             print("\n[ERR] 等待 DeepSeek 回复超时（已重试）:")
             traceback.print_exc()
-            await queue.put(("done", (None, [], str(exc), "timeout")))
+            await queue.put(("done", (None, str(exc), "timeout")))
         except MalformedToolCallError as exc:
             # 上游给了回复但 tool_call 坏且重发耗尽：上游质量问题，客户端可重试。
             print(f"\n[重发] 坏结构重发耗尽: {exc}")
-            await queue.put(("done", (None, [], str(exc), "upstream_error")))
+            await queue.put(("done", (None, str(exc), "upstream_error")))
         except Exception as exc:  # noqa: BLE001
             traceback.print_exc()
-            await queue.put(("done", (None, [], str(exc), "server_error")))
+            await queue.put(("done", (None, str(exc), "server_error")))
 
     task = asyncio.create_task(runner())
 
@@ -236,7 +236,7 @@ async def _stream_chat_completion(
                 first_content_at = time.monotonic()
             yield encode({"content": payload})
         else:
-            reply_content, _blocks, error, error_type = payload
+            reply_content, error, error_type = payload
             break
 
     await task
