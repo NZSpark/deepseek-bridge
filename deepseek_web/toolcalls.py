@@ -301,6 +301,11 @@ def parse_tool_calls(text: str, valid_names: set | None = None) -> list[dict[str
             try:
                 data = json.loads(_normalize_json_text(raw))
             except json.JSONDecodeError:
+                # 一段里并列多个裸 JSON 对象（模型常见写法）：整体不是合法 JSON，
+                # 逐个扫出平衡对象再解析，否则只有第一个能救回，其余静默丢弃。
+                if allow_bare_object:
+                    for obj in _iter_balanced_objects(raw):
+                        _consume(obj, allow_bare_object=True)
                 return
         if isinstance(data, dict) and isinstance(data.get("tool_calls"), list):
             entries = data["tool_calls"]
@@ -369,13 +374,19 @@ def parse_tool_calls(text: str, valid_names: set | None = None) -> list[dict[str
                     break
             probe = segment[cursor:]
             parsed = False
+            consumed = 0
+            search_from = 0
             for obj in _iter_balanced_objects(probe):
                 _consume(obj, allow_bare_object=True)
-                pos = match.end() + cursor + probe.index(obj) + len(obj)
+                # 同一个 marker 后面可能并列多个裸对象：全部消费，不要只取第一个。
+                # probe.index 需从上次命中之后继续找，避免重复对象时定位到前面的同名字符串。
+                found = probe.find(obj, search_from)
+                if found < 0:
+                    found = search_from
+                consumed = found + len(obj)
+                search_from = consumed
                 parsed = True
-                break
-            if not parsed:
-                pos = match.end()
+            pos = match.end() + cursor + consumed if parsed else match.end()
 
     if valid_names:
         calls = [c for c in calls if c.get("name") in valid_names]

@@ -1,7 +1,7 @@
 # 当前状态（每次收尾覆盖，保持 < 60 行）
 
-> 摘要：已移除死代码「代码块提取」，接口收敛为纯文本返回；待提交推送。无阻塞。
-> 更新于：2026-10-22 · HEAD `48d41e2`
+> 摘要：单围栏内并列多个裸 JSON tool_call 现已全部解析（此前只取第一个）；待提交推送。
+> 更新于：2026-10-24 · HEAD `72e30b2`
 
 ## 正在进行
 
@@ -9,7 +9,10 @@
 
 ## 最近完成（按时间倒序）
 
-1. **移除代码块提取死代码**（本次，未提交）：`_extract_code_blocks`、`CODE_BLOCK_SELECTOR`、`CODE_TAG_SELECTOR`
+1. **单围栏多 tool_call 解析**（本次，未提交）：`_consume` 整体 `json.loads` 失败时退化为
+   逐平衡对象解析；兜底段去掉 `break`，单个 marker 后的多个裸对象全部消费。
+   覆盖围栏内并列裸对象 / 无围栏 marker + 多对象 / 重复对象 / JSON 数组回归，新增 2 条测试。
+2. **移除代码块提取死代码**（本次，未提交）：`_extract_code_blocks`、`CODE_BLOCK_SELECTOR`、`CODE_TAG_SELECTOR`
    全部删除；`send_chat` / `_send_chat_locked` 返回 `str`，`complete_with_toolcall_retry` 返回 `str`，
    `responses.run_chat` 返回三元组。提取结果从未被任何客户端消费，属死代码。
    连带修 10 处测试 fake 的元组返回与 3 处解包；全量 pytest 绿、ruff 干净、harness 14 通过。
@@ -35,8 +38,11 @@
 
 ## 下一步（按优先级）
 
-1. 提交并推送本次「移除代码块提取」。
-2. 可选：给「闭合块内裸换行」补一条显式回归用例到 `tests/test_malformed.py`（L03 目前无测试钉住）。
+1. 提交并推送本次「单围栏多 tool_call 解析」。
+2. **待决策：截断策略全盘优化**（已分析，未实施）。6 处截断点中 T1（`_seed_messages` 保最近）
+   与 T2（`_clamp_prompt` 保头尾）方向相反，叠加会切碎最近上下文。建议先改 T2 为「按段保最近」，
+   再调 `SEED_MAX_CHARS` 12000 → 32000。
+3. 可选：给「闭合块内裸换行」补一条显式回归用例到 `tests/test_malformed.py`（L03 目前无测试钉住）。
 3. 可选：`doc/tasks.md` 其余 `[ ]`（B2.3 错误码、H4 冒烟脚本、H6 验收记录）逐条按源码核实后处理。
 4. 可选：`doc/update.md`（340 行）抽通用教训到 `lessons.md`。
 
