@@ -9,6 +9,7 @@ import base64
 from dataclasses import dataclass
 from typing import Any
 
+from . import config
 from .models import ChatMessage
 from .toolcalls import format_tool_call_emphasis, format_tools_instruction
 
@@ -245,21 +246,46 @@ def _run_messages(messages: list[ChatMessage]) -> list[ChatMessage]:
     return delta
 
 
-def _seed_messages(messages: list[ChatMessage], max_chars: int):
-    """为新会话准备“播种”内容：尽量带上完整上下文，超出预算时保留最近的。
+def _trim_to_recent_turns(messages: list[ChatMessage], max_turns: int) -> list[ChatMessage]:
+    """只保留最近 ``max_turns`` 轮消息（一轮 = 一条 user 及其后的 assistant/tool）。
+
+    轮数以 ``role == "user"`` 为界从后往前数。消息中若不含 user（畸形输入），
+    原样返回，交给后续字符预算处理。``max_turns <= 0`` 表示不限。
+    """
+    if max_turns <= 0:
+        return messages
+    seen = 0
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].role == "user":
+            seen += 1
+            if seen > max_turns:
+                return messages[index + 1:]
+    return messages
+
+
+def _seed_messages(messages: list[ChatMessage], max_chars: int, max_turns: int = 0):
+    """为新会话准备“播种”内容：尽量带上完整上下文，超出限制时保留最近的。
 
     网页会话一旦轮转（新开会话），后端的上下文就清空了。此时如果还只发增量，
     模型会收到一条“没有前因”的孤立消息——不报错，但会胡编。
+
+    两层限制按「先轮数、后字符」顺序应用：
+
+    1. ``max_turns``：只重放最近 N 轮。历史太长时模型容易把旧任务当成新指令
+       再执行一遍；更早的目标由 ``tasks.resume_block`` 以摘要形式兜底。
+    2. ``max_chars``：字符预算，防止单轮里塞了超大工具结果把输入框撑爆。
 
     :return: (system 消息, 保留的其余消息, 是否发生了截断)
     """
     systems = [m for m in messages if m.role == "system"]
     rest = [m for m in messages if m.role != "system"]
 
+    trimmed = _trim_to_recent_turns(rest, max_turns)
+    truncated = len(trimmed) < len(rest)
+
     kept: list[ChatMessage] = []
     used = sum(len(_content_to_text(m.content)) for m in systems)
-    truncated = False
-    for message in reversed(rest):
+    for message in reversed(trimmed):
         size = len(_content_to_text(message.content))
         if kept and used + size > max_chars:
             truncated = True
@@ -277,6 +303,7 @@ def build_prompt(  # noqa: PLR0913 扁平签名是刻意的：prompt 的全部�
     *,
     seed: bool = False,
     seed_max_chars: int | None = None,
+    seed_max_turns: int | None = None,
     task_block: str | None = None,
 ) -> str:
     """把客户端发来的完整 OpenAI 消息数组，转换成要发给网页输入框的文本。
@@ -291,7 +318,9 @@ def build_prompt(  # noqa: PLR0913 扁平签名是刻意的：prompt 的全部�
     """
     if seed:
         systems, kept, truncated = _seed_messages(
-            messages, seed_max_chars or DEFAULT_SEED_MAX_CHARS
+            messages,
+            seed_max_chars or DEFAULT_SEED_MAX_CHARS,
+            seed_max_turns if seed_max_turns is not None else config.SEED_MAX_TURNS,
         )
         parts: list[str] = [
             "[上下文重建] 这是一个新会话。以下是本次任务此前的对话记录，请据此继续，不要从头重做。"

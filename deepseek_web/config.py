@@ -246,6 +246,10 @@ BUCKET_LOCK_TIMEOUT_S = env_float("BUCKET_LOCK_TIMEOUT_S", 0)
 READY_TIMEOUT_MS = env_int("READY_TIMEOUT_MS", 15000)
 # 播种（新会话时重放历史）的最大字符数预算；超出时保留最近的消息
 SEED_MAX_CHARS = env_int("SEED_MAX_CHARS", 12000)
+# 播种时最多重放最近几轮对话（一轮 = 一条 user 消息及其后的 assistant / tool 往返）。
+# 轮数超限时只保留最近 N 轮，避免模型看到太久远的任务又从头重做一遍；
+# 被丢掉的更早上下文由 tasks.resume_block（任务目标 + 最近进展）兜底。0 = 不限。
+SEED_MAX_TURNS = env_int("SEED_MAX_TURNS", 3)
 # 网页会话超过以下任一阈值后，下一轮自动轮转到新会话（0 表示禁用该维度）
 SESSION_MAX_TURNS = env_int("SESSION_MAX_TURNS", 60)
 SESSION_MAX_TOKENS = env_int("SESSION_MAX_TOKENS", 60000)
