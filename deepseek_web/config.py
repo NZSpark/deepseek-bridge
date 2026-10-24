@@ -248,7 +248,7 @@ READY_TIMEOUT_MS = env_int("READY_TIMEOUT_MS", 15000)
 SEED_MAX_CHARS = env_int("SEED_MAX_CHARS", 12000)
 # 播种时最多重放最近几轮对话（一轮 = 一条 user 消息及其后的 assistant / tool 往返）。
 # 轮数超限时只保留最近 N 轮，避免模型看到太久远的任务又从头重做一遍；
-# 被丢掉的更早上下文由 tasks.resume_block（任务目标 + 最近进展）兜底。0 = 不限。
+# 更早的上下文由 tasks.resume_block（最近进展）补充说明。0 = 不限。
 SEED_MAX_TURNS = env_int("SEED_MAX_TURNS", 3)
 # 网页会话超过以下任一阈值后，下一轮自动轮转到新会话（0 表示禁用该维度）
 SESSION_MAX_TURNS = env_int("SESSION_MAX_TURNS", 60)
@@ -269,7 +269,7 @@ RESPONSES_TOOL_BUFFER = env_bool("RESPONSES_TOOL_BUFFER", True)
 
 # ==================== 任务快照（轮转后续接任务）====================
 # 是否启用任务快照：每个会话桶在 user_data/.deepseek_tasks/ 下维护一份轻量任务状态
-# （任务目标 + 最近进展）。网页会话轮转播种时优先注入它，确保任务目标不被
+# （最近进展）。网页会话轮转播种时注入它，作为最近几轮历史之外的补充，避免
 # SEED_MAX_CHARS 截断，从而“不丢任务”。关闭后回到纯历史播种的旧行为。
 TASK_SNAPSHOT_ENABLED = env_bool("TASK_SNAPSHOT_ENABLED", True)
 # 任务快照存放目录。

@@ -151,20 +151,19 @@ def record(bucket: str, messages: list[ChatMessage]) -> None:
 
 
 def resume_block(bucket: str) -> str:
-    """生成轮转播种用的“任务续接”块；无任务文件时返回空串。
+    """生成轮转播种用的“任务续接”块；无最近进展时返回空串。
 
-    放在播种内容最前面，保证即使历史被 SEED_MAX_CHARS 截断，任务目标仍能传达。
+    放在播种内容最前面，作为最近几轮历史之外的补充。刻意**不**注入
+    「任务目标」——那是最早那条 user 消息，往往早已完成。
     """
     data = load(bucket)
-    goal = (data.get("goal") or "").strip()
-    if _is_meta_prompt(goal):
-        goal = ""  # 污染过的 goal 绝不能以「任务目标：」口吻注入，否则会中断任务
     recent = data.get("recent")
-    if not goal and not recent:
+    # 不再注入「任务目标」：播种已按 SEED_MAX_TURNS 保留最近几轮，
+    # 历史里自然带着当前任务；再额外贴一条最早的目标，反而会把早已完成的
+    # 旧任务重新塞给模型，让它跑偏。任务状态块只做「最近进展」的补充。
+    if not recent:
         return ""
     lines = ["[任务状态] 这是一个正在进行的任务，请据此继续，不要从头重做。"]
-    if goal:
-        lines.append(f"任务目标：{goal}")
     if isinstance(recent, list) and recent:
         lines.append("最近进展：")
         for item in recent[-max(1, config.TASK_KEEP_MESSAGES):]:

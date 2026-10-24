@@ -72,11 +72,14 @@ class TaskSnapshotTests(unittest.TestCase):
         self.assertEqual(data["goal"], "原始目标")
         self.assertEqual(data["turns"], 2)
 
-    def test_resume_block_contains_goal(self):
+    def test_resume_block_only_carries_recent_progress(self):
+        """resume 块刻意不带「任务目标」：最早那条 user 消息往往早已完成，
+        再贴一遍会把模型拉回旧任务。播种本身已保留最近几轮历史。"""
         tasks.record("t", self._msgs(("user", "重构仓库"), ("assistant", "进行中")))
         block = tasks.resume_block("t")
-        self.assertIn("任务目标：重构仓库", block)
+        self.assertNotIn("任务目标", block)
         self.assertIn("最近进展", block)
+        self.assertIn("进行中", block)
 
     def test_resume_block_empty_without_snapshot(self):
         self.assertEqual(tasks.resume_block("never-seen"), "")

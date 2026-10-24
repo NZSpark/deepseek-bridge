@@ -202,10 +202,15 @@
 
 ## 9. 任务快照
 
-`TASK_SNAPSHOT_ENABLED`（默认开）：每桶把「任务目标 + 最近 `TASK_KEEP_MESSAGES`（8）条」
+`TASK_SNAPSHOT_ENABLED`（默认开）：每桶把最近 `TASK_KEEP_MESSAGES`（8）条消息
 落盘到 `TASK_FILE_DIR/<TASK_NAMESPACE>/`，用于**新会话播种**与重启续跑。
-它**不是**对话历史的完整备份；`/bridge` 命令消息不写入快照（否则 `/bridge status`
-会变成任务目标）。目标上限 `TASK_GOAL_MAX_CHARS`（2000）。
+它**不是**对话历史的完整备份；`/bridge` 命令消息不写入快照。
+
+轮转播种时 `resume_block()` 只输出「最近进展」列表，**不再注入「任务目标」**。
+原因：目标取的是最早那条 user 消息，而换页时那个任务往往早已完成；再贴一遍
+会把模型拉回旧任务。播种本身已按 `SEED_MAX_TURNS`（3）保留最近几轮历史，
+足够传达当前在做什么。`goal` 字段仍会记录（观测用，上限 `TASK_GOAL_MAX_CHARS`），
+但不参与注入。
 
 ---
 
