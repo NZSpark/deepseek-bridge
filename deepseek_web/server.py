@@ -225,6 +225,8 @@ def _session_key(
     request: ChatCompletionRequest,
     header_value: str | None,
     user_agent: str | None = None,
+    *,
+    for_command: bool = False,
 ) -> str | None:
     """确定本次请求属于哪个会话桶（按任务隔离会话）。
 
@@ -237,6 +239,11 @@ def _session_key(
        同一条网页会话；按 cwd 分桶后各用一条独立会话。
     4. **按 User-Agent 自动分桶**：从 UA 提取客户端名称，使不同客户端自动隔离。
 
+    ``for_command=True``（``/bridge ...`` 命令）时**跳过第 3 级 cwd 推断**：命令的
+    首条 user 消息就是命令文本本身，里面没有 ``<cwd>``，强行推断只会落到 UA 桶，
+    使命令作用在错误的桶上（看起来像“命令打断了当前会话”）。命令只认显式的
+    请求头 / ``user`` 字段，缺省时用 UA 兜底——同一客户端内始终是同一个桶。
+
     以上都没有时返回 None（默认桶，全局共用）。取值会被消毒（只保留
     ``[\\w.\\-:]``）并限长，避免变成非法文件名 / 超长 JSON 键。
     """
@@ -247,7 +254,7 @@ def _session_key(
         user = getattr(request, "user", None)
         raw = user if isinstance(user, str) else ""
     raw = raw.strip()
-    if not raw and config.SESSION_SCOPING_BY_CWD:
+    if not raw and not for_command and config.SESSION_SCOPING_BY_CWD:
         # 工作目录来自提示词（Pi 的 system prompt 里带 <cwd>…</cwd>）
         raw = _session_key_from_cwd(request) or ""
     if not raw and config.SESSION_SCOPING_BY_UA:
@@ -436,16 +443,18 @@ async def chat_completions(
             "unavailable",
         )
 
-    # 按任务隔离会话：同一客户端 / 同一 X-DeepSeek-Session 取值的请求共用一条网页会话
-    session_key = _session_key(request, x_deepseek_session, user_agent)
-    if config.DEBUG:
-        print(f"[debug] session_key={session_key!r}")
-
     # 桥内命令：由桥直接应答，**不发给网页版**。放在这里（而不是 driver 内）是为了：
     # 一、命令不写任务快照（否则 `/bridge status` 会变成任务目标）；
     # 二、两条协议路径与流式 / 非流式共用同一套识别与应答。
+    # 命令的桶**不参与 cwd 推断**（首条 user 就是命令文本，推不出 cwd），
+    # 否则命令会落到 UA 桶上、作用错会话——表现为「命令打断了正在进行的会话」。
+    command_key = (
+        _session_key(request, x_deepseek_session, user_agent, for_command=True)
+        if bridge_commands.is_command(request.messages)
+        else None
+    )
     command_reply = await bridge_commands.handle_command(
-        request.messages, driver, session_key
+        request.messages, driver, command_key
     )
     if command_reply is not None:
         if request.stream:
@@ -459,6 +468,11 @@ async def chat_completions(
                 },
             )
         return bridge_commands.command_completion_response(request.model, command_reply)
+
+    # 按任务隔离会话：同一客户端 / 同一 X-DeepSeek-Session 取值的请求共用一条网页会话
+    session_key = _session_key(request, x_deepseek_session, user_agent)
+    if config.DEBUG:
+        print(f"[debug] session_key={session_key!r}")
 
     # 任务快照：记录本轮 messages，供轮转播种时续接任务（不丢任务目标）。
     bucket = session_key or DEFAULT_SESSION_KEY

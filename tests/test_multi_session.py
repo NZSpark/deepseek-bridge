@@ -555,6 +555,27 @@ class SessionKeyResolutionTests(BucketTestCase):
         self.assertTrue(second.startswith("cwd:beta-"), second)
         self.assertNotEqual(first, second)
 
+    def test_command_bucket_skips_cwd_inference(self):
+        """命令路径不能用 cwd 推断：命令请求的首条 user 就是命令文本，推不出 cwd，
+        强行推断会落到 UA 桶上，使 `/bridge session reset` 等作用在错误的会话上。"""
+        from deepseek_web.server import _session_key
+
+        # 带完整 system prompt（含 <cwd>）时，普通请求仍按 cwd 分桶
+        normal = _session_key(self.pi_request("/Users/me/Projects/alpha"), None, self.PI_UA)
+        self.assertTrue(normal.startswith("cwd:alpha-"), normal)
+        # 命令路径跳过 cwd，回落到 UA 桶（同一客户端内一致）
+        command = _session_key(
+            self.pi_request("/Users/me/Projects/alpha"), None, self.PI_UA,
+            for_command=True,
+        )
+        self.assertEqual(command, "ua:pi")
+        # 显式 header / user 仍然最优先，命令不会因此丢失精确的桶
+        self.assertEqual(
+            _session_key(self.pi_request("/x/alpha"), "pi-task-7", self.PI_UA,
+                         for_command=True),
+            "pi-task-7",
+        )
+
     def test_cwd_bucket_is_stable_and_safe(self):
         from deepseek_web.server import _session_key
 

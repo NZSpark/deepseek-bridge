@@ -228,6 +228,11 @@
 （工具循环第二轮不会重放旧命令）、命名空间保留（参数不合法回用法，不执行也不丢给模型）、
 两条协议共用 `handle_command`。帮助文本**只从 `REGISTRY` 生成**。
 
+**命令的桶不走 cwd 推断**（`_session_key(..., for_command=True)`）：命令请求的首条 user
+消息就是命令文本本身，里面没有 `<cwd>`，若照常推断会落到 UA 桶上，使 `session reset` /
+`token` 等作用在**错误的会话**上——表现为「一条只读命令打断了正在进行的对话」。命令只认
+显式 `X-DeepSeek-Session` / `user`，缺省时用 UA 兜底（同一客户端内始终是同一个桶）。
+
 改状态回执必须写清四句：影响范围（只当前桶）、不是删除历史、下一轮会发生什么、怎么撤销。
 `link` 地址校验：`https` + `LINK_ALLOWED_HOSTS` 白名单 + `/a/chat/s/<ID>` 路径，裸 ID 自动补全，
 **校验失败绝不猜一个目标导航过去**。细节见 [bridge_commands.md](bridge_commands.md)。
