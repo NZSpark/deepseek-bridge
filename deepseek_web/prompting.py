@@ -215,6 +215,19 @@ def _delta_piece(streamed: str, current: str) -> tuple[str | None, str]:
 DEFAULT_SEED_MAX_CHARS = 12000
 
 
+def _render_seed_message(message: ChatMessage) -> str:
+    """播种专用的消息渲染：tool 结果压成摘要，其余与 :func:`_render_message` 一致。
+
+    只用于 ``seed=True``。工具输出动辄几千字，整段播种会把用户的真实指令淹没；
+    增量路径（``_run_messages``）仍原样发送最新 tool 结果，模型能看到完整细节。
+    """
+    if message.role == "tool":
+        tag = f" {message.tool_call_id}" if message.tool_call_id else ""
+        summary = _summarize_tool_result(_content_to_text(message.content))
+        return f"[工具执行结果{tag}]\n{summary}"
+    return _render_message(message)
+
+
 def _render_message(message: ChatMessage) -> str:
     """把单条消息渲染成喂给网页版的一段文本。"""
     content = _content_to_text(message.content).strip()
@@ -251,6 +264,10 @@ def _trim_to_recent_turns(messages: list[ChatMessage], max_turns: int) -> list[C
 
     轮数以 ``role == "user"`` 为界从后往前数。消息中若不含 user（畸形输入），
     原样返回，交给后续字符预算处理。``max_turns <= 0`` 表示不限。
+
+    工具循环会在一轮里塞进大量 assistant/tool 消息：按「轮」截断时，最近 3 轮往往
+    全是工具结果，真正的用户指令被挤掉。因此**先按 user 条数选轮**（见
+    :func:`_seed_messages`），这里只负责按 user 边界切分。
     """
     if max_turns <= 0:
         return messages
@@ -263,6 +280,44 @@ def _trim_to_recent_turns(messages: list[ChatMessage], max_turns: int) -> list[C
     return messages
 
 
+def _select_last_user_turns(messages: list[ChatMessage], max_turns: int) -> list[ChatMessage]:
+    """按 **user 消息条数** 从后往前选最近 ``max_turns`` 条，并保留每条的后续消息。
+
+    与 :func:`_trim_to_recent_turns` 的区别：后者按「user 出现次数」切轮，一轮里可能
+    夹着十几条 assistant/tool 消息，最近 3 轮常常全是工具结果、没有一句人话。这里保证
+    选中的是**最近 max_turns 条真正的用户输入**（及其后的 assistant/tool，保持工具调用
+    配对完整），让模型一眼看到用户最新的意图。
+
+    ``max_turns <= 0`` 表示不限；不含 user 时原样返回。
+    """
+    if max_turns <= 0:
+        return messages
+    user_indices = [i for i, m in enumerate(messages) if m.role == "user"]
+    if len(user_indices) <= max_turns:
+        return messages
+    return messages[user_indices[-max_turns]:]
+
+
+#: 播种时单条 tool 结果压缩到的最大字符数（保留首行与结论，其余省略）。
+SEED_TOOL_RESULT_MAX_CHARS = 300
+
+
+def _summarize_tool_result(text: str, limit: int = SEED_TOOL_RESULT_MAX_CHARS) -> str:
+    """把一条工具结果压成播种用的摘要：保留首行，超长则截断并标注省略。
+
+    只用于 seed 路径。工具输出常常几千字，整段塞进播种会淹没用户指令；
+    保留首行足以让模型知道“这条命令做了什么 / 结果是什么”，细节可按需重跑。
+    """
+    flat = text.strip()
+    if not flat:
+        return ""
+    first = flat.splitlines()[0].strip()
+    if len(flat) <= limit:
+        return flat
+    head = first[:limit]
+    return head + ("…（后续输出已省略）" if len(head) < len(flat) else "")
+
+
 def _seed_messages(messages: list[ChatMessage], max_chars: int, max_turns: int = 0):
     """为新会话准备“播种”内容：尽量带上完整上下文，超出限制时保留最近的。
 
@@ -271,8 +326,9 @@ def _seed_messages(messages: list[ChatMessage], max_chars: int, max_turns: int =
 
     两层限制按「先轮数、后字符」顺序应用：
 
-    1. ``max_turns``：只重放最近 N 轮。历史太长时模型容易把旧任务当成新指令
-       再执行一遍；更早的目标由 ``tasks.resume_block`` 以摘要形式兜底。
+    1. ``max_turns``：只重放最近 N 条 **user 消息**（及其后的 assistant/tool）。
+       工具循环里一轮可能夹着十几条工具消息，按「轮」截断会让最近几轮全是工具
+       结果、真正的人话被挤掉；按 user 条数选轮能保证最新意图一定在里面。
     2. ``max_chars``：字符预算，防止单轮里塞了超大工具结果把输入框撑爆。
 
     :return: (system 消息, 保留的其余消息, 是否发生了截断)
@@ -280,7 +336,7 @@ def _seed_messages(messages: list[ChatMessage], max_chars: int, max_turns: int =
     systems = [m for m in messages if m.role == "system"]
     rest = [m for m in messages if m.role != "system"]
 
-    trimmed = _trim_to_recent_turns(rest, max_turns)
+    trimmed = _select_last_user_turns(rest, max_turns)
     truncated = len(trimmed) < len(rest)
 
     kept: list[ChatMessage] = []
@@ -329,7 +385,7 @@ def build_prompt(  # noqa: PLR0913 扁平签名是刻意的：prompt 的全部�
             parts.append(task_block)
         if truncated:
             parts.append("（更早的部分因长度限制已省略，如需可向我确认。）")
-        parts.extend(_render_message(m) for m in systems + kept)
+        parts.extend(_render_seed_message(m) for m in systems + kept)
     else:
         parts = [_render_message(m) for m in _run_messages(messages)]
 

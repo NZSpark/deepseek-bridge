@@ -98,6 +98,11 @@
 播种长度上限 `SEED_MAX_CHARS`（12000）。到顶**必须**映射成 400 `context_length_exceeded`，
 不是 504——把「额度用尽」报成「超时」会让客户端无限重试。
 
+播种选轮按 **user 消息条数**（`SEED_MAX_TURNS`，3），不是按「user 出现次数切轮」：
+工具循环里一轮常夹着十几条 assistant/tool，按轮截断会让最近几轮全是工具结果、真正的
+用户指令被挤掉。另外播种时**超长工具结果压成首行摘要**（`SEED_TOOL_RESULT_MAX_CHARS`，300），
+避免几千字的命令输出淹没用户意图；增量路径仍原样发送最新工具结果。
+
 ### 4.3 页面池：自愈是硬要求
 
 - 每桶一页；`MAX_SESSION_BUCKETS`（8）封顶，`BUCKET_IDLE_TTL_S`（900s）空闲回收 + LRU 淘汰。

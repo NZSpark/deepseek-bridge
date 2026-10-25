@@ -165,6 +165,37 @@ class SeedingTests(SessionTestCase):
         self.assertIn("已省略", prompt)
         self.assertLess(prompt.count("旧" * 100), 5)
 
+    def test_seeded_prompt_keeps_latest_user_turns_not_tool_noise(self):
+        """播种按 user 条数选轮：最近 3 条用户输入必须都在，不能被工具消息挤掉。"""
+        messages = [{"role": "user", "content": "最早的任务"}]
+        for round_no in range(1, 4):
+            messages.append({"role": "assistant", "content": f"第{round_no}步"})
+            messages.append({"role": "tool", "content": f"tool-{round_no} 输出",
+                             "tool_call_id": f"c{round_no}"})
+            messages.append({"role": "user", "content": f"用户第{round_no}次输入"})
+        prompt = srv.build_prompt(
+            srv.ChatCompletionRequest(messages=messages).messages,
+            seed=True,
+            seed_max_turns=3,
+        )
+        self.assertNotIn("最早的任务", prompt)
+        for round_no in range(1, 4):
+            self.assertIn(f"用户第{round_no}次输入", prompt)
+
+    def test_seeded_prompt_summarizes_long_tool_output(self):
+        """播种时超长工具结果压成首行摘要，避免淹没用户指令；增量路径仍发全文。"""
+        huge = "第一行结论\n" + "细节" * 500
+        messages = [
+            {"role": "user", "content": "跑一下"},
+            {"role": "tool", "content": huge, "tool_call_id": "c1"},
+        ]
+        seeded = srv.build_prompt(
+            srv.ChatCompletionRequest(messages=messages).messages, seed=True
+        )
+        self.assertIn("第一行结论", seeded)
+        self.assertIn("后续输出已省略", seeded)
+        self.assertLess(len(seeded), len(huge))
+
     def test_seeded_prompt_keeps_system_and_latest(self):
         prompt = srv.build_prompt(
             srv.ChatCompletionRequest(messages=self.messages()).messages,
