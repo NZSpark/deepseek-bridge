@@ -4,6 +4,10 @@
 
 > 本项目通过 Playwright 驱动一个真实的 Chromium 浏览器，复用本地登录态，把网页对话“桥接”成标准 `/v1/chat/completions`（Chat Completions）与 `/v1/responses`（Responses API，供 Codex CLI 使用）接口。无需官方 API Key。
 
+![DeepSeek Web-to-API Bridge 系统架构图](doc/pic/architecture.svg)
+
+*图 1：客户端通过本地 OpenAI 兼容 API 访问 DeepSeek 网页版；会话路由、页面池和响应编码由桥接层负责。*
+
 ---
 
 > 设计细节（契约、会话模型、结束判定、错误语义、显式取舍与已知限制）见 **[doc/design.md](doc/design.md)**。
@@ -147,6 +151,12 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 ## 🔌 接口说明
 
+所有 API 请求共享会话路由与浏览器自动化基础设施。Chat Completions 面向通用 OpenAI SDK，Responses API 则为使用 `wire_api = "responses"` 的 Codex CLI 提供协议兼容层；两者最终都通过同一类持久化网页会话完成生成。
+
+![API 请求处理流程图](doc/pic/request-flow.svg)
+
+*图 2：从 HTTP 请求校验、会话桶选择、页面恢复和 prompt 提交，到生成结束判定与 JSON/SSE 响应。实际超时、重试行为以配置和设计文档为准。*
+
 ### `GET /v1/models`
 
 模型发现端点，返回可用模型列表（供 Pi 等客户端的 `models.json` 使用）。
@@ -289,7 +299,11 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 ## 🛠 Function Calling 原理
 
-DeepSeek 网页版不支持原生 function calling，本项目采用三步模拟：
+DeepSeek 网页版不支持原生 function calling，本项目采用三步模拟：将工具描述转换为提示词约束，从网页回复中提取结构化调用，再由客户端执行工具并把结果放回下一轮对话。桥接层负责协议转换和结构校验，不会代替客户端执行 `bash`、`read` 等工具。
+
+![模拟 Function Calling 流程图](doc/pic/function-calling.svg)
+
+*图 3：工具调用的完整闭环。遇到空围栏、截断 JSON 或语法错误时，桥接层可在同一网页会话中提示模型重发；重试耗尽后按错误策略返回。*
 
 1. **注入**：把客户端的 `tools` 描述转成自然语言指令（[`format_tools_instruction`](deepseek_web/toolcalls.py)），追加到 prompt 末尾，要求模型用 ```` ```tool_call ```` 代码块回话。
 2. **解析**：从模型回复中解析工具调用（[`parse_tool_calls`](deepseek_web/toolcalls.py)）。解析器兼容两种形态：
