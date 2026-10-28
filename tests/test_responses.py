@@ -303,7 +303,10 @@ class LocalToolRoundTests(unittest.TestCase):
             '{"path": "doc.md", "start": 2, "end": 2, "new_text": "TWO"}}\n```'
         )
         driver = SequencedDriver([edit, "已改好第 2 行"])
-        chat = responses.to_chat_request(make_request(input="改第 2 行"))
+        # 方案 A：只有客户端声明了工具，本地工具才会并入并被执行。
+        chat = responses.to_chat_request(make_request(input="改第 2 行", tools=[
+            {"type": "function", "name": "bash", "parameters": {"type": "object"}},
+        ]))
 
         async def go():
             return await responses.run_chat(chat, driver, None)
@@ -315,7 +318,16 @@ class LocalToolRoundTests(unittest.TestCase):
         self.assertIn("工具执行结果 edit_markdown", driver.chats[1]["prompt"])
         self.assertIn('"ok": true', driver.chats[1]["prompt"])
         names = [(t.get("function") or t)["name"] for t in (chat.tools or [])]
+        self.assertIn("bash", names)
         self.assertIn("edit_markdown", names)
+
+    def test_plain_chat_request_gets_no_tools(self):
+        """方案 A：没声明工具的纯聊天请求不得被注入 edit_markdown。"""
+        self._workspace()
+        chat = responses.to_chat_request(make_request(input="随便聊聊"))
+        self.assertIsNone(chat.tools)
+        prompt = responses.build_prompt(chat.messages, chat.tools, chat.tool_choice)
+        self.assertNotIn("edit_markdown", prompt)
 
     def test_local_mode_off_keeps_client_tool_calls(self):
         self.config.EDIT_MARKDOWN_LOCAL = False

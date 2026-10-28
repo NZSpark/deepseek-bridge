@@ -305,7 +305,12 @@ def parse_tool_calls(text: str, valid_names: set | None = None) -> list[dict[str
                 # 逐个扫出平衡对象再解析，否则只有第一个能救回，其余静默丢弃。
                 if allow_bare_object:
                     for obj in _iter_balanced_objects(raw):
-                        _consume(obj, allow_bare_object=True)
+                        # 平衡扫描可能把原文整段原样吐回（例如引号未转义时，
+                        # 第一个 { 到最后一个 } 恰好是整串）。此时再调 _consume
+                        # 会拿到同一段文本、再次走到这里 —— 无限递归。
+                        # 只递归严格更短的片段；原样吐回视为「救不出」，直接放弃。
+                        if obj.strip() != raw:
+                            _consume(obj, allow_bare_object=True)
                 return
         if isinstance(data, dict) and isinstance(data.get("tool_calls"), list):
             entries = data["tool_calls"]

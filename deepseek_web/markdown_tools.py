@@ -65,6 +65,12 @@ def effective_tools(
     if not config.EDIT_MARKDOWN_LOCAL or tool_choice == "none":
         return result or None
 
+    # Only join an existing tool set. A request that declared no tools is a plain
+    # chat request: injecting the schema there would append the whole tool
+    # instruction block to every prompt and invite unsolicited tool_calls.
+    if not result:
+        return None
+
     # The bridge owns this name in local mode; do not let a client redefine the
     # argument contract for a tool that can write files on the host.
     result = [

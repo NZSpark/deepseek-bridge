@@ -194,6 +194,26 @@ def test_effective_tools_respects_tool_choice_none(monkeypatch: pytest.MonkeyPat
     assert markdown_tools.effective_tools(None, "none") is None
 
 
+def test_effective_tools_does_not_inject_into_plain_chat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """没声明任何工具的纯聊天请求不得被注入 edit_markdown。
+
+    否则每轮 prompt 都会追加整段工具说明，既浪费 token 又诱导模型输出 tool_call，
+    并让「无工具时 prompt 就是纯文本」这一契约失效。
+    """
+    monkeypatch.setattr(config, "EDIT_MARKDOWN_LOCAL", True)
+    assert markdown_tools.effective_tools(None, None) is None
+    assert markdown_tools.effective_tools([], None) is None
+
+
+def test_effective_tools_joins_client_tool_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "EDIT_MARKDOWN_LOCAL", True)
+    client = [{"type": "function", "function": {"name": "bash", "parameters": {}}}]
+    names = [(t.get("function") or t)["name"] for t in markdown_tools.effective_tools(client, None)]
+    assert names == ["bash", "edit_markdown"]
+
+
 # ==================== local execution loop ====================
 
 

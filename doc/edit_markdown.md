@@ -2,6 +2,7 @@
 
 > 状态：阶段一至四已实现。已落地 deepseek_web/markdown_io.py（纯文件引擎）、deepseek_web/markdown_tools.py（schema / 沙箱 / 本地执行循环）、EDIT_MARKDOWN_* 配置、tests/test_markdown_io.py（14 条）、tests/test_markdown_tools.py（27 条）。
 > 四个入口共用同一执行服务：server.py 非流式用 run_local_edit_markdown_loop（多轮），server.py 流式、responses.py 非流式/流式用 run_local_tool_round（单轮回喂）；tools 集合统一由 effective_tools() 生成。
+> effective_tools() 只在客户端**已声明至少一个工具**时才并入 edit_markdown；未声明工具的纯聊天请求不会被注入，避免每轮 prompt 追加整段工具说明。
 > verify() 已接入执行路径（apply_edit 内调用），并覆盖「选区内围栏被改坏」这一原缺口。
 > 默认 EDIT_MARKDOWN_LOCAL=false、EDIT_MARKDOWN_WRITE=false，默认行为与未实现前一致。
 > 未验证：真机（Playwright + 真实 DeepSeek 网页）下的多轮本地工具闭环与写盘。
