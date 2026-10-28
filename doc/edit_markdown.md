@@ -1,8 +1,9 @@
 # `edit_markdown` 功能设计方案
 
-> 状态：阶段一至三已实现。已落地 deepseek_web/markdown_io.py（纯文件引擎）、deepseek_web/markdown_tools.py（schema / 沙箱 / 本地执行循环）、EDIT_MARKDOWN_* 配置、tests/test_markdown_io.py（14 条用例）。
+> 状态：阶段一至四已实现。已落地 deepseek_web/markdown_io.py（纯文件引擎）、deepseek_web/markdown_tools.py（schema / 沙箱 / 本地执行循环）、EDIT_MARKDOWN_* 配置、tests/test_markdown_io.py（14 条）、tests/test_markdown_tools.py（27 条）。
+> 四个入口共用同一执行服务：server.py 非流式用 run_local_edit_markdown_loop（多轮），server.py 流式、responses.py 非流式/流式用 run_local_tool_round（单轮回喂）；tools 集合统一由 effective_tools() 生成。
+> verify() 已接入执行路径（apply_edit 内调用），并覆盖「选区内围栏被改坏」这一原缺口。
 > 默认 EDIT_MARKDOWN_LOCAL=false、EDIT_MARKDOWN_WRITE=false，默认行为与未实现前一致。
-> 尚未实现：阶段四（Responses / 流式入口接入同一执行服务）、tests/test_markdown_tools.py、verify() 接入执行路径。
 > 未验证：真机（Playwright + 真实 DeepSeek 网页）下的多轮本地工具闭环与写盘。
 > 本文参考 `/Users/onetreehill/Github/ChatGPTBridge/doc/edit_markdown.md`，结合本项目 DeepseekBridge 的现有架构制定。各节按当前实现状态分别标注「已实现 / 尚未实现」。
 

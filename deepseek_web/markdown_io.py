@@ -175,8 +175,12 @@ def verify(original: MdDoc, edited: MdDoc, start: int, end: int) -> list[dict[st
     the targeted line interval.
     """
     issues: list[dict[str, object]] = []
-    old_outside = [f for f in original.fences if f.end < start or f.start > end]
-    for old in old_outside:
+    # Fences that begin or end inside the edited range must survive verbatim too:
+    # editing just an opening fence line can silently turn fenced code into prose.
+    old_fences = [
+        f for f in original.fences if f.end < start or f.start > end
+    ] + [f for f in original.fences if not (f.end < start or f.start > end)]
+    for old in old_fences:
         # Line numbers after the edited range may shift; compare the fence's literal
         # bytes instead of requiring the old numeric line positions to remain fixed.
         before = original.lines[old.start - 1 : old.end]

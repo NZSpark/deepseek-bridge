@@ -14,6 +14,7 @@ from .driver import (
     DeepSeekTimeoutError,
     MalformedToolCallError,
 )
+from .markdown_tools import local_round_eligible, run_local_tool_round
 from .models import ChatCompletionRequest
 from .prompting import estimate_tokens, extract_images
 from .token_speed import TokenSpeed, apply_stream_timing
@@ -183,6 +184,20 @@ async def _stream_chat_completion(
                 wants_tools=wants_tools,
                 valid_names=_tool_names(request.tools),
             )
+            # 本地 Markdown 工具：执行一轮并把真实结果回喂网页模型。
+            # 只在整批调用都属于本地工具时才接管；混合批次仍按原样交给客户端。
+            eligible = local_round_eligible(
+                parse_tool_calls(reply, _tool_names(request.tools)) if wants_tools else []
+            )
+            if eligible:
+                reply, _calls, _handled = await run_local_tool_round(
+                    driver,
+                    reply,
+                    request.tools,
+                    request.tool_choice,
+                    seeded_prompt or prompt,
+                    session_key,
+                )
             await queue.put(("done", (reply,  None, None)))
         except DeepSeekContextLimitError as exc:
             # 给客户端一个可区分的类型，而不是笼统的 server_error

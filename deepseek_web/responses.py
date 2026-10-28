@@ -23,6 +23,7 @@ from .driver import (
     DeepSeekContextLimitError,
     DeepSeekTimeoutError,
 )
+from .markdown_tools import effective_tools, run_local_tool_round
 from .models import ChatCompletionRequest, ChatMessage, ToolCall
 from .prompting import build_prompt, estimate_tokens, extract_images
 from .toolcall_retry import complete_with_toolcall_retry
@@ -149,6 +150,8 @@ def to_chat_request(req: ResponsesRequest) -> ChatCompletionRequest:
     tools = None
     if req.tools:
         tools = [t for t in (_tool_to_chat(x) for x in req.tools) if t]
+    # 本地 Markdown 工具由桥接层拥有 canonical schema；开关关闭时保持原样。
+    tools = effective_tools(tools, req.tool_choice)
 
     return ChatCompletionRequest(
         model=req.model,
@@ -236,18 +239,6 @@ def _map_exception(exc: Exception) -> tuple[int, str]:
 # ==================== 共享执行（流式/非流式都走这里）====================
 
 
-def _resolve_session(request: ChatCompletionRequest, session_key: str | None, seed: bool) -> str:
-    delta = build_prompt(request.messages, request.tools, request.tool_choice)
-    seeded = build_prompt(
-        request.messages,
-        request.tools,
-        request.tool_choice,
-        seed=True,
-        seed_max_chars=config.SEED_MAX_CHARS,
-    )
-    return seeded if seed else delta
-
-
 async def run_chat(
     request: ChatCompletionRequest,
     driver,
@@ -302,6 +293,17 @@ async def run_chat(
         valid_names=valid_names,
     )
     tool_calls = parse_tool_calls(reply, valid_names) if wants_tools else []
+    # 本地 Markdown 工具：执行一轮把真实结果回喂网页模型，再决定最终形态。
+    # 多轮闭环由 chat 路径的 run_local_edit_markdown_loop 负责；这里只做一轮，
+    # 避免把整条多轮循环塞进一次缓冲的上游调用里。
+    reply, tool_calls, _handled = await run_local_tool_round(
+        driver,
+        reply,
+        request.tools,
+        request.tool_choice,
+        seeded_prompt,
+        session_key,
+    )
     sent_prompt = driver.sent_prompt(session_key) or prompt
     return reply, tool_calls, sent_prompt
 

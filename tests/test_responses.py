@@ -258,5 +258,81 @@ class StreamTests(unittest.TestCase):
         self.assertEqual(parsed[-1][1]["response"]["error"]["type"], "timeout")
 
 
+class SequencedDriver(FakeDriver):
+    """按顺序返回多轮回复的假 driver（用于观察本地工具回喂）。"""
+
+    def __init__(self, replies):
+        super().__init__()
+        self.replies = list(replies)
+
+    async def send_chat(self, prompt, on_delta=None, seeded_prompt=None, key=None,
+                        images=None):
+        self.chats.append({"prompt": prompt, "key": key, "seeded": seeded_prompt})
+        self.last_prompt = prompt
+        reply = self.replies.pop(0)
+        if on_delta is not None:
+            await on_delta(reply)
+        return reply
+
+
+class LocalToolRoundTests(unittest.TestCase):
+    """/v1/responses 也必须接入本地工具执行（阶段四）。"""
+
+    def setUp(self):
+        from deepseek_web import config
+
+        self.config = config
+        self._saved = (config.EDIT_MARKDOWN_LOCAL, config.EDIT_MARKDOWN_ROOT)
+
+    def tearDown(self):
+        self.config.EDIT_MARKDOWN_LOCAL, self.config.EDIT_MARKDOWN_ROOT = self._saved
+
+    def _workspace(self):
+        import tempfile
+
+        root = Path(tempfile.mkdtemp())
+        (root / "doc.md").write_text("one\ntwo\nthree\n", encoding="utf-8")
+        self.config.EDIT_MARKDOWN_LOCAL = True
+        self.config.EDIT_MARKDOWN_ROOT = str(root)
+        return root
+
+    def test_local_round_runs_and_feeds_result_back(self):
+        self._workspace()
+        edit = (
+            '```tool_call\n{"name": "edit_markdown", "arguments": '
+            '{"path": "doc.md", "start": 2, "end": 2, "new_text": "TWO"}}\n```'
+        )
+        driver = SequencedDriver([edit, "已改好第 2 行"])
+        chat = responses.to_chat_request(make_request(input="改第 2 行"))
+
+        async def go():
+            return await responses.run_chat(chat, driver, None)
+
+        reply, calls, _sent = run(go())
+        self.assertEqual(reply, "已改好第 2 行")
+        self.assertEqual(calls, [])
+        self.assertEqual(len(driver.chats), 2)
+        self.assertIn("工具执行结果 edit_markdown", driver.chats[1]["prompt"])
+        self.assertIn('"ok": true', driver.chats[1]["prompt"])
+        names = [(t.get("function") or t)["name"] for t in (chat.tools or [])]
+        self.assertIn("edit_markdown", names)
+
+    def test_local_mode_off_keeps_client_tool_calls(self):
+        self.config.EDIT_MARKDOWN_LOCAL = False
+        driver = FakeDriver(reply=TOOL_REPLY)
+        chat = responses.to_chat_request(make_request(input="hi", tools=[
+            {"type": "function", "name": "bash", "parameters": {"type": "object"}},
+        ]))
+
+        async def go():
+            return await responses.run_chat(chat, driver, None)
+
+        _reply, calls, _sent = run(go())
+        self.assertEqual([c["name"] for c in calls], ["bash"])
+        self.assertEqual(len(driver.chats), 1)
+        names = [(t.get("function") or t)["name"] for t in (chat.tools or [])]
+        self.assertNotIn("edit_markdown", names)
+
+
 if __name__ == "__main__":
     unittest.main()

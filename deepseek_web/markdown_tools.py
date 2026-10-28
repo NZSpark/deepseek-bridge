@@ -206,6 +206,81 @@ def _is_local_only(calls: list[dict[str, Any]]) -> bool:
     return bool(calls) and all(call.get("name") == EDIT_MARKDOWN_TOOL_NAME for call in calls)
 
 
+def local_round_eligible(calls: list[dict[str, Any]]) -> bool:
+    """Whether a parsed batch may be executed by the bridge itself."""
+    return config.EDIT_MARKDOWN_LOCAL and _is_local_only(calls)
+
+
+def _max_steps() -> int:
+    return max(1, int(getattr(config, "EDIT_MARKDOWN_MAX_STEPS", 3)))
+
+
+def step_limit_reply(max_steps: int | None = None) -> str:
+    """Text returned when the local round budget is exhausted."""
+    limit = _max_steps() if max_steps is None else max_steps
+    return (
+        f"已达到本次请求的本地 Markdown 工具执行轮数上限（{limit} 轮）；"
+        "未执行后续工具调用。请检查已返回的工具结果，必要时发起新的请求继续。"
+    )
+
+
+def _render_results(calls: list[dict[str, Any]]) -> str:
+    sections: list[str] = []
+    for index, call in enumerate(calls, start=1):
+        result = execute_edit_markdown(call.get("arguments"))
+        rendered = json.dumps(result, ensure_ascii=False)
+        sections.append(f"[工具执行结果 edit_markdown #{index}]\n{rendered}")
+    return "\n\n".join(sections)
+
+
+def _continuation_prompt(result_block: str) -> str:
+    return (
+        f"{result_block}\n\n"
+        "请根据以上真实工具执行结果继续完成用户任务。若还需调用工具，严格使用已声明的 "
+        "tool_call JSON 格式；不要假称未执行的写入已经成功。"
+    )
+
+
+async def run_local_tool_round(  # noqa: PLR0913, PLR0917
+    driver: Any,
+    initial_reply: str,
+    tools: list[dict[str, Any]] | None,
+    tool_choice: Any,
+    seeded_prompt: str,
+    session_key: str | None,
+) -> tuple[str, list[dict[str, Any]], bool]:
+    """Run **one** local execution round, if eligible.
+
+    Used by the Responses / streaming entrances, which cannot hold the whole
+    multi-round loop inside a single buffered upstream call. Returns
+    ``(reply, calls, handled)``; when not eligible the inputs pass through.
+    """
+    from .toolcall_retry import complete_with_toolcall_retry
+    from .toolcalls import _tool_names, parse_tool_calls
+
+    active_tools = effective_tools(tools, tool_choice)
+    valid_names = _tool_names(active_tools)
+    calls = parse_tool_calls(initial_reply, valid_names) if active_tools else []
+    if not local_round_eligible(calls):
+        return initial_reply, calls, False
+
+    result_block = _render_results(calls)
+    seed_context = (
+        f"{seeded_prompt}\n\n[你之前的回复]\n{initial_reply}\n\n{result_block}"
+    ).strip()
+    current_reply = await complete_with_toolcall_retry(
+        driver,
+        _continuation_prompt(result_block),
+        seeded_prompt=seed_context,
+        key=session_key,
+        images=None,
+        wants_tools=bool(active_tools),
+        valid_names=valid_names,
+    )
+    calls = parse_tool_calls(current_reply, valid_names) if active_tools else []
+    return current_reply, calls, True
+
+
 async def run_local_edit_markdown_loop(  # noqa: PLR0913, PLR0917
     driver: Any,
     initial_reply: str,
@@ -227,43 +302,25 @@ async def run_local_edit_markdown_loop(  # noqa: PLR0913, PLR0917
     active_tools = effective_tools(tools, tool_choice)
     valid_names = _tool_names(active_tools)
     calls = parse_tool_calls(initial_reply, valid_names) if active_tools else []
-    if not config.EDIT_MARKDOWN_LOCAL or not _is_local_only(calls):
+    if not local_round_eligible(calls):
         return initial_reply, calls, False
 
     seed_context = seeded_prompt
     current_reply = initial_reply
     steps = 0
-    max_steps = max(1, int(getattr(config, "EDIT_MARKDOWN_MAX_STEPS", 3)))
+    max_steps = _max_steps()
 
     while _is_local_only(calls):
         if steps >= max_steps:
-            return (
-                (
-                    "已达到本次请求的本地 Markdown 工具执行轮数上限；未执行后续工具调用。"
-                    "请检查已返回的工具结果，必要时发起新的请求继续。"
-                ),
-                [],
-                True,
-            )
+            return step_limit_reply(max_steps), [], True
         steps += 1
-        result_sections: list[str] = []
-        for index, call in enumerate(calls, start=1):
-            result = execute_edit_markdown(call.get("arguments"))
-            rendered = json.dumps(result, ensure_ascii=False)
-            result_sections.append(f"[工具执行结果 edit_markdown #{index}]\n{rendered}")
-
-        result_block = "\n\n".join(result_sections)
+        result_block = _render_results(calls)
         seed_context = (
             f"{seed_context}\n\n[你之前的回复]\n{current_reply}\n\n{result_block}"
         ).strip()
-        next_prompt = (
-            f"{result_block}\n\n"
-            "请根据以上真实工具执行结果继续完成用户任务。若还需调用工具，严格使用已声明的 "
-            "tool_call JSON 格式；不要假称未执行的写入已经成功。"
-        )
         current_reply = await complete_with_toolcall_retry(
             driver,
-            next_prompt,
+            _continuation_prompt(result_block),
             seeded_prompt=seed_context,
             key=session_key,
             images=None,
