@@ -180,8 +180,17 @@ def execute_edit_markdown(arguments: Any) -> dict[str, Any]:
             # write_md's backup is deliberately omitted because the backup has
             # already been created and its exact path must be returned to caller.
             # write_md uses an atomic replacement for the destination file.
+            # 写盘失败时异常向上抛，备份**保留**——它是唯一的回滚点。
             write_md(edited, path)
             written = True
+            # 写盘成功：备份用完即删，避免目录无限膨胀。工作副本由 git 兜底，
+            # 改错可 `git checkout -- <file>`；备份只是写盘瞬间的安全垫。
+            # 删除失败不影响本次写入结果，此时仍把路径回报给调用方。
+            try:
+                backup.backup_path.unlink(missing_ok=True)
+                backup_path = None
+            except OSError:
+                pass
         elif original.raw != edited.raw and write_requested and not should_write:
             note = "服务端写盘权限已关闭，本次只生成 diff，未修改文件。"
         elif original.raw == edited.raw:

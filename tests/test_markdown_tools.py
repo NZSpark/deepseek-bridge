@@ -135,9 +135,10 @@ def test_write_requires_both_gates(workspace: Path) -> None:
     assert (workspace / "doc.md").read_text(encoding="utf-8") == "one\ntwo\nthree\n"
 
 
-def test_write_happens_with_both_gates_and_creates_backup(
+def test_write_happens_and_backup_is_removed_on_success(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """方案 B：写盘成功后备份用完即删（工作副本由 git 兜底）。"""
     monkeypatch.setattr(config, "EDIT_MARKDOWN_WRITE", True)
     result = markdown_tools.execute_edit_markdown(
         {"path": "doc.md", "start": 2, "end": 2, "new_text": "TWO", "write": True}
@@ -145,9 +146,30 @@ def test_write_happens_with_both_gates_and_creates_backup(
     assert result["ok"] is True
     assert result["written"] is True
     assert (workspace / "doc.md").read_text(encoding="utf-8") == "one\nTWO\nthree\n"
-    backup = Path(result["backup"])
-    assert backup.is_file()
-    assert backup.read_text(encoding="utf-8") == "one\ntwo\nthree\n"
+    assert result["backup"] is None
+    backups = list((workspace / "backups").glob("*.bak"))
+    assert backups == []
+
+
+def test_backup_is_kept_when_write_fails(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """写盘失败时备份必须保留——它是唯一回滚点。"""
+    monkeypatch.setattr(config, "EDIT_MARKDOWN_WRITE", True)
+
+    def boom(*_args, **_kwargs):
+        raise OSError("磁盘满了")
+
+    monkeypatch.setattr(markdown_tools, "write_md", boom)
+    result = markdown_tools.execute_edit_markdown(
+        {"path": "doc.md", "start": 2, "end": 2, "new_text": "TWO", "write": True}
+    )
+    assert result["ok"] is False
+    # 原文件未变
+    assert (workspace / "doc.md").read_text(encoding="utf-8") == "one\ntwo\nthree\n"
+    backups = list((workspace / "backups").glob("*.bak"))
+    assert len(backups) == 1
+    assert backups[0].read_text(encoding="utf-8") == "one\ntwo\nthree\n"
 
 
 def test_noop_edit_does_not_write(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
