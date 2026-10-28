@@ -372,6 +372,12 @@ def build_prompt(  # noqa: PLR0913 扁平签名是刻意的：prompt 的全部�
       生效，会被放在**历史之前、上下文重建头之后**，因此**不会**被
       ``seed_max_chars`` 的尾部截断逻辑丢掉——这是“轮转不丢任务”的关键。
     """
+    # In local edit mode, inject the bridge-owned canonical schema even when the
+    # client did not declare edit_markdown. Keep the default external-tool path intact.
+    from .markdown_tools import effective_tools
+
+    tools = effective_tools(tools, tool_choice)
+
     if seed:
         systems, kept, truncated = _seed_messages(
             messages,

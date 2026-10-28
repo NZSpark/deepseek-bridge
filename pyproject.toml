@@ -91,6 +91,8 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
+# Markdown 引擎测试采用 pytest 函数与 fixture，使用 assert 是该测试风格的惯例；生产代码仍受 S101 检查。
+"tests/test_markdown_*.py" = ["S101"]
 # 真机 E2E 的那个 HTTP 客户端：目标地址来自 DEEPSEEK_E2E_BASE_URL（运行期才知道），
 # 而 S310 关心的是「scheme 可能不是 http(s)」——这个前置条件在 open_url() 里已经**真的做出来**
 # （非 http/https 直接拒绝），所以这里按文件豁免一次，而不是散落 4 处行内 noqa。

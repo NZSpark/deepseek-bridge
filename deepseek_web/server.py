@@ -20,6 +20,7 @@ from .driver import (
     DeepSeekWebDriver,
     MalformedToolCallError,
 )
+from .markdown_tools import effective_tools, run_local_edit_markdown_loop
 from .models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -33,7 +34,7 @@ from .prompting import build_prompt, estimate_tokens, extract_images
 from .responses import ResponsesRequest, handle_responses
 from .streaming import _stream_bridge_reply, _stream_chat_completion
 from .toolcall_retry import complete_with_toolcall_retry
-from .toolcalls import _tool_names, parse_tool_calls, to_tool_call_models
+from .toolcalls import _tool_names, to_tool_call_models
 
 driver = DeepSeekWebDriver()
 
@@ -469,6 +470,9 @@ async def chat_completions(
             )
         return bridge_commands.command_completion_response(request.model, command_reply)
 
+    # 本地 Markdown 工具由桥接层拥有 canonical schema；默认关闭时保留客户端工具。
+    request.tools = effective_tools(request.tools, request.tool_choice)
+
     # 按任务隔离会话：同一客户端 / 同一 X-DeepSeek-Session 取值的请求共用一条网页会话
     session_key = _session_key(request, x_deepseek_session, user_agent)
     if config.DEBUG:
@@ -557,8 +561,18 @@ async def chat_completions(
 
     # usage 用真正发出去的 prompt 估算（driver 可能选了播种版 / 中途轮转过）。
     # 按会话桶读取，并发时不会拿到别的 Agent 的 prompt；回退到预判值兼容假 driver。
+    # 本地模式只在坏结构重试完成后执行；外部工具调用和混合批次仍交给客户端。
+    reply_content, tool_calls, _handled_locally = await run_local_edit_markdown_loop(
+        driver,
+        reply_content,
+        request.tools,
+        request.tool_choice,
+        prompt,
+        seeded_prompt,
+        session_key,
+        images,
+    )
     sent_prompt = driver.sent_prompt(session_key) or prompt
-    tool_calls = parse_tool_calls(reply_content, valid_names) if wants_tools else []
 
     if tool_calls:
         return ChatCompletionResponse(

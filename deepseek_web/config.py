@@ -272,6 +272,14 @@ RESPONSES_TOOL_BUFFER = env_bool("RESPONSES_TOOL_BUFFER", True)
 # （最近进展）。网页会话轮转播种时注入它，作为最近几轮历史之外的补充，避免
 # SEED_MAX_CHARS 截断，从而“不丢任务”。关闭后回到纯历史播种的旧行为。
 TASK_SNAPSHOT_ENABLED = env_bool("TASK_SNAPSHOT_ENABLED", True)
+# Markdown 局部编辑（见 doc/edit_markdown.md）。本地执行与实际写盘默认均关闭。
+EDIT_MARKDOWN_LOCAL = env_bool("EDIT_MARKDOWN_LOCAL", False)
+EDIT_MARKDOWN_WRITE = env_bool("EDIT_MARKDOWN_WRITE", False)
+EDIT_MARKDOWN_ROOT = env_str("EDIT_MARKDOWN_ROOT", str(PROJECT_ROOT))
+EDIT_MARKDOWN_BACKUP_DIR = env_str("EDIT_MARKDOWN_BACKUP_DIR", "output/backups")
+EDIT_MARKDOWN_MAX_FILE_BYTES = env_int("EDIT_MARKDOWN_MAX_FILE_BYTES", 4 * 1024 * 1024)
+EDIT_MARKDOWN_MAX_STEPS = max(1, env_int("EDIT_MARKDOWN_MAX_STEPS", 3))
+
 # 任务快照存放目录。
 TASK_FILE_DIR = env_str("TASK_FILE_DIR", "./user_data/.deepseek_tasks")
 # 任务快照命名空间：同一台机器上可能跑着多个「桥」（如 DeepseekBridge / GeminiBridge），
