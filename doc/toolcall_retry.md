@@ -104,6 +104,46 @@ return bool(DSML_CLAIM.search(text))
 解析层能读就不是坏结构。若判据不看解析层，会把能执行的调用也判坏、白白重发一次。
 这正是 3.4 与第 6 节强调的「与解析层共用同一口径」的具体落地。
 
+### 3.3b 非法 JSON 转义与 XML 标签（2026-10-29 补）
+
+两类此前会「双重放行」的形态：解析层救不出，判据层又不认识，结果整段原文作为
+普通文本回给客户端，任务静默终止。
+
+**非法转义**：模型把 shell 的 `\|`（如 `grep 'A\|B'`）原样写进 JSON 字符串。
+`\|` 不是合法 JSON 转义（只允许 `\" \\ \/ b f n r t u`），`json.loads` 必然抛错。
+
+- 解析层修法：`_normalize_json_text` 在归一全角标点之后，把非法转义补成合法转义
+  （`\|` → `\\|`），字符串值保留原有反斜杠，bash 收到 `\|` 与原意一致。
+- 判据层自动跟随：`_loads_lenient` 调用的是同一个 `_normalize_json_text`，口径一致。
+
+```python
+_INVALID_ESCAPE = re.compile(r'\\(?!["\\\\/bfnrtu])')
+return _INVALID_ESCAPE.sub(r"\\\\", text.translate(_FULLWIDTH_MAP))
+```
+
+**XML 风格标签**：模型输出 `<tool_call>{...}</tool_call>`。
+
+- 解析层**能**救：兜底分支跳过 `<`、`>` 噪声后扫平衡 JSON 对象，所以这种形态本身
+  是可执行的，不该判坏。
+- 判据层原先**不认识**这个标签（只认 ` ```tool_call ` 与 DSML），于是当里面 JSON 也
+  坏掉时两边都放行。补一条 `XML_CLAIM`：声称要调用却救不出调用 → 重发。
+
+```python
+XML_CLAIM = re.compile(r"<\s*/?\s*tool[-_]?call\b", re.IGNORECASE)
+
+# has_no_usable_call 末尾：
+return bool(XML_CLAIM.search(text))
+
+# has_malformed_tool_call：
+if (DSML_CLAIM.search(text) or XML_CLAIM.search(text)) and not _parse_any(text):
+    return True
+```
+
+| 形态 | 解析层 | 判据 |
+| --- | --- | --- |
+| `<tool_call>` + 合法 JSON（含可修转义） | 救得出 | 不重发 |
+| `<tool_call>` + 非法 / 截断 JSON | 救不出 | **重发** |
+
 ### 3.4 刻意不看的东西
 
 - **普通 `python` / `bash` / `json` 等其它语言围栏**：正常回答里出现代码块是常态，
@@ -228,6 +268,17 @@ return bool(DSML_CLAIM.search(text))      # 声称要调用却一个都没救出
 ---
 
 ## 7. 测试（能变红）
+
+### 7.1 非法转义与 XML 标签（`tests/test_invalid_escape.py`）
+
+| 用例 | 修正前 | 修正后 |
+| --- | --- | --- |
+| `\|` 被归一成 `\\|` | 红 | 绿 |
+| 含 `\|` 的 ```tool_call 解析出 bash 且保留 `\|` | 红 | 绿 |
+| 合法含转义调用不被判坏 | — | 绿 |
+| `<tool_call>` + 合法 JSON 可解析 | 绿 | 绿 |
+| `<tool_call>` + 非法 JSON 判坏 | **红** | 绿 |
+
 
 | 用例 | 期望 | 变红条件 |
 | --- | --- | --- |

@@ -22,6 +22,11 @@ DSML_CLAIM = re.compile(
     re.IGNORECASE,
 )
 
+# XML 风格标签：`<tool_call>...</tool_call>`。不在 ```tool_call 围栏识别范围内，
+# 但解析层能宽容地救出里面的裸 JSON。若解析层也救不出，说明这段调用结构坏了，
+# 必须判坏重发，否则原文会作为普通文本回给客户端，任务静默终止。
+XML_CLAIM = re.compile(r"<\s*/?\s*tool[-_]?call\b", re.IGNORECASE)
+
 # 裸标记：只在行首/空白后出现才算。
 BARE = re.compile(r"^[ \t]*tool_call\b(?![0-9A-Za-z_])[ \t]*[:：]?[ \t]*(.*)$", re.MULTILINE | re.IGNORECASE)  # noqa: E501 正则单行更易读
 
@@ -105,7 +110,10 @@ def has_no_usable_call(text, valid_names=None):
     # DSML 形态：出现 calls / invoke 标签（声称要调用），但解析层一个调用都救不出来
     # （参数被换行截断、JSON 不合法、标签对不上……）→ 同样必须重发。
     # 解析层能救出调用时上面已 return False，所以不会误伤合法的 DSML。
-    return bool(DSML_CLAIM.search(text))
+    if DSML_CLAIM.search(text):
+        return True
+    # XML 风格标签同理：声称要调用却救不出 → 必须重发。
+    return bool(XML_CLAIM.search(text))
 
 
 def _parse_any(text):
@@ -122,8 +130,8 @@ def has_malformed_tool_call(text):
         return False
     if has_unclosed_tool_fence(text):
         return True
-    # DSML 声称要调用却救不出任何调用 → 这段调用本身不可用
-    if DSML_CLAIM.search(text) and not _parse_any(text):
+    # DSML / XML 声称要调用却救不出任何调用 → 这段调用本身不可用
+    if (DSML_CLAIM.search(text) or XML_CLAIM.search(text)) and not _parse_any(text):
         return True
     if any(not _is_valid_call(m.group(2)) for m in _FENCED.finditer(text)):
         return True

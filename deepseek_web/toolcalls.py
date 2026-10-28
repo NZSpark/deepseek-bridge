@@ -124,14 +124,24 @@ _FULLWIDTH_MAP = str.maketrans(
 )
 
 
-def _normalize_json_text(text: str) -> str:
-    """把 JSON 文本里的全角标点归一成 ASCII（网页端渲染兜底）。
+# 非法转义：反斜杠后面不是 JSON 允许的字符。典型来源是模型把 shell 的 `\|`
+# 原样写进 JSON 字符串，而 JSON 只允许 " \\ / b f n r t u。这种文本 json.loads
+# 必然抛错，整条调用会被静默丢弃——必须先补一个反斜杠转成合法转义。
+_INVALID_ESCAPE = re.compile(r'\\(?!["\\\\/bfnrtu])')
 
-    只映射结构性标点（括号/引号/冒号/逗号），**不碰正文内容**——冒号或逗号在
-    字符串值里也可能出现，但那些位置归一后仍是合法 JSON 的一部分（字符串里的
-    逗号本就不需要转义）。判据与解析层都必须调用它，保证口径一致。
+
+def _normalize_json_text(text: str) -> str:
+    r"""把 JSON 文本里的全角标点归一成 ASCII，并修复非法转义。
+
+    1. 全角标点：只映射结构性标点（括号/引号/冒号/逗号），**不碰正文内容**——
+       冒号或逗号在字符串值里也可能出现，但那些位置归一后仍是合法 JSON 的一部分
+       （字符串里的逗号本就不需要转义）。
+    2. 非法转义：反斜杠后跟 `|`、`s` 等非 JSON 允许字符时，补一个反斜杠转成合法转义，
+       字符串值保留原有的反斜杠（bash 收到原样的 `\|`，与原意一致）。
+
+    判据与解析层都必须调用它，保证口径一致。
     """
-    return text.translate(_FULLWIDTH_MAP)
+    return _INVALID_ESCAPE.sub(r"\\\\", text.translate(_FULLWIDTH_MAP))
 
 
 def _normalize_tool_entry(entry: Any) -> dict[str, Any] | None:
